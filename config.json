@@ -1,0 +1,29 @@
+{
+    "amazon": {
+        "access_key": "AKIAJV72MEQHVSYYFFXQ",
+        "partner_tag": "tejtejasvi-21",
+        "region": "IN",
+        "secret_key": "r9cuvr6PUfueB3Oni5lrqbyukFhjgJTsp33OxpqX"
+    },
+    "email": {
+        "sender_email": "vv6250625@gmail.com",
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "smtp_password": "ypeh azam vkjh awua",
+        "recipients": [
+            "perryvickey@gmai.com"
+        ]
+    },
+    "notification_schedule": [
+        "Weekly"
+    ],
+    "whatsapp_channel_names": "Testing channel",
+    "telegram_bot_token": "7713478940:AAGj9SwUSmdRpuT7kP5deuk3eG0qmP8xq24",
+    "telegram_chat_id": "@random_public_channel",
+    "weekly_notification_day": "Monday",
+    "weekly_notification_time": "08:15",
+    "whatsapp": {
+        "channel_names": "Testing channel",
+        "group_names": "testing_group"
+    }
+}
