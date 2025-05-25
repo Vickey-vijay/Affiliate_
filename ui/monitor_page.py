@@ -46,17 +46,9 @@ def run_monitor_once_for_sites(sites):
     
     def update_log(message):
         nonlocal log_text
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_text += f"[{timestamp}] {message}\n"
-        st.session_state["log_text"] = log_text 
-        unique_key = f"log_area_{datetime.now().strftime('%H%M%S%f')}"
-        
-        log_placeholder.text_area(
-            "Logs", 
-            log_text, 
-            height=500,
-            key=unique_key
-        )
+        log_text += message + "\n"
+        # Use a unique key by appending current time
+        log_placeholder.text_area("Log", log_text, height=300, key=f"log_area_{int(time.time()*1000)}")
         
         st.markdown("""
             <script>

@@ -21,6 +21,8 @@ class PublishPage:
         try:
             if hasattr(self, 'notification_publisher'):
                 self.notification_publisher.close()
+            # Also clean up any WebDriver instances
+            self._cleanup_whatsapp_drivers()
         except Exception as e:
             print(f"Warning: Error in PublishPage cleanup: {e}")
 
@@ -71,14 +73,38 @@ class PublishPage:
         with col2:
             if st.button("Clear Selection"):
                 st.session_state.selected_products["Select"] = False
-
+        
+        # Create a new DataFrame with the desired column order
+        display_df = st.session_state.selected_products.copy()
+        
+        # Select the columns you want to display in the desired order
+        columns_to_display = ["Select", "product_name", "Product_unique_ID", "product_major_category", 
+                             "product_minor_category", "Product_current_price", "Product_Buy_box_price"]
+        
+        # Make sure all columns exist in the dataframe
+        available_columns = [col for col in columns_to_display if col in display_df.columns]
+        
+        # Add any remaining columns at the end
+        remaining_columns = [col for col in display_df.columns if col not in available_columns and col != "Select"]
+        display_columns = available_columns + remaining_columns
+        
+        # Display the editor with rearranged columns
         edited_df = st.data_editor(
-            st.session_state.selected_products,
+            display_df[display_columns],
             hide_index=True,
             column_config={
-                "Select": st.column_config.CheckboxColumn("Select")
+                "Select": st.column_config.CheckboxColumn("Select"),
+                "product_name": st.column_config.TextColumn("Product Name"),
+                "Product_unique_ID": st.column_config.TextColumn("ASIN"),
+                "Product_current_price": st.column_config.NumberColumn("Current Price"),
+                "Product_Buy_box_price": st.column_config.NumberColumn("Buy Box Price"),
+                "product_major_category": st.column_config.TextColumn("Category"),
+                "product_minor_category": st.column_config.TextColumn("Sub-category")
             }
         )
+        
+        # Update the session state with edited values
+        st.session_state.selected_products = edited_df
 
         # Create two columns for the buttons
         col1, col2 = st.columns(2)
@@ -172,46 +198,31 @@ class PublishPage:
         auto_config = self.db.get_auto_publish_config()
         saved_filters = auto_config.get("filters", {})
         saved_schedule_type = auto_config.get("schedule_type", "Frequency")
-        saved_schedule = auto_config.get("schedule", "6 hours" if saved_schedule_type == "Frequency" else [])
+        saved_schedule = auto_config.get("schedule", "15" if saved_schedule_type == "Frequency" else [])
         is_active = auto_config.get("active", False)
         
         st.info("Set up automatic publishing to monitor prices and publish products based on criteria.")
         
         with st.expander("Price Filters", expanded=True):
             filters = {
-                "filter_lower_than_buybox": st.checkbox(
-                    "Price lower than buybox", 
-                    value=saved_filters.get("filter_lower_than_buybox", True),
-                    help="Only publish products where current price is lower than buy box price"
-                ),
-                "filter_never_published": st.checkbox(
-                    "Never published before", 
-                    value=saved_filters.get("filter_never_published", False),
-                    help="Only publish products that have never been published before"
-                ),
-                "filter_lower_than_last_published": st.checkbox(
-                    "Price dropped since last publish", 
-                    value=saved_filters.get("filter_lower_than_last_published", False),
-                    help="Only publish products where price has dropped since last publication"
-                ),
-                "filter_published_over_days": st.checkbox(
-                    "Not published recently", 
-                    value=saved_filters.get("filter_published_over_days", False),
-                    help="Only publish products not published in the specified number of days"
-                )
+                "filter_lower_than_buybox": st.checkbox("Price lower than buybox", value=bool(saved_filters.get("filter_lower_than_buybox", True)), help="Only publish products where current price is lower than buy box price"),
+                "filter_never_published": st.checkbox("Never published before", value=bool(saved_filters.get("filter_never_published", False)), help="Only publish products that have never been published before"),
+                "filter_lower_than_last_published": st.checkbox("Price dropped since last publish", value=bool(saved_filters.get("filter_lower_than_last_published", False)), help="Only publish products where price has dropped since last publication"),
+                "filter_published_over_days": st.checkbox("Not published recently", value=bool(saved_filters.get("filter_published_over_days", False)), help="Only publish products not published in the specified number of days")
             }
-            
+
             if filters["filter_published_over_days"]:
                 days_threshold = st.number_input(
                     "Days threshold", 
                     min_value=1, 
-                    value=saved_filters.get("days_threshold", 4),
+                    value=int(saved_filters.get("days_threshold", 4)),
                     help="Publish products not published in this many days"
                 )
-                if days_threshold is not None:
-                    if "numeric_values" not in saved_filters:
-                        saved_filters["numeric_values"] = {}
-                    saved_filters["numeric_values"]["days_threshold"] = int(days_threshold)
+                # Create a new dictionary that includes both boolean and numeric values
+                filters = {
+                    **filters,  # Keep all the boolean filter settings
+                    "days_threshold": int(days_threshold)  # Add the numeric days threshold
+                }
 
         st.subheader("Schedule")
         schedule_type = st.radio(
@@ -221,11 +232,20 @@ class PublishPage:
         )
 
         if schedule_type == "Frequency":
-            frequency = st.selectbox(
-                "Check Every",
-                ["1 hour", "3 hours", "6 hours", "12 hours", "24 hours"],
-                index=["1 hour", "3 hours", "6 hours", "12 hours", "24 hours"].index(saved_schedule) if isinstance(saved_schedule, str) and saved_schedule in ["1 hour", "3 hours", "6 hours", "12 hours", "24 hours"] else 2
+            # Replace dropdown with number input for minutes
+            frequency_minutes = st.number_input(
+                "Check Every (minutes)",
+                min_value=1,
+                max_value=60,
+                value=int(saved_schedule) if isinstance(saved_schedule, (int, str)) and str(saved_schedule).isdigit() else 15,
+                step=1,
+                help="Enter a value between 1 and 60 minutes"
             )
+            
+            st.markdown("⚠️ **Warning**: Please set appropriate timing to allow enough time for publishing. Too frequent checks may cause errors.")
+            
+            # Convert minutes to string for saving
+            frequency = str(frequency_minutes)
         else:
             default_times = saved_schedule if isinstance(saved_schedule, list) else []
             times = st.multiselect(
@@ -257,6 +277,18 @@ class PublishPage:
         if is_active:
             next_run_time = auto_config.get("next_run", "Unknown")
             st.info(f"Next scheduled run: {next_run_time}")
+
+        # Display upcoming schedules in JSON format
+        if is_active:
+            with st.expander("Upcoming Schedules"):
+                upcoming_schedules = {
+                    "schedule_type": schedule_type,
+                    "frequency_minutes": frequency if schedule_type == "Frequency" else None,
+                    "fixed_times": times if schedule_type == "Fixed Times" else None,
+                    "next_run": auto_config.get("next_run", "Unknown"),
+                    "filters": filters
+                }
+                st.json(upcoming_schedules)
 
         if start_button:
             config = {
@@ -337,6 +369,7 @@ class PublishPage:
                                 if current_price < last_published_price:
                                     eligible_product_ids.append(product_id)
                             
+
                             if eligible_product_ids:
                                 if "$and" not in query:
                                     query["$and"] = []
@@ -372,8 +405,8 @@ class PublishPage:
                         print(f"Found {len(filtered_products)} products matching filters")
                         
                         # Update next run time in config
-                        hours = int(frequency.split()[0]) if schedule_type == "Frequency" and frequency else 24
-                        next_run = datetime.now() + timedelta(hours=hours)
+                        minutes = int(frequency.split()[0]) if schedule_type == "Frequency" and frequency else 15
+                        next_run = datetime.now() + timedelta(minutes=minutes)
                         self.db.save_auto_publish_config({
                             **config,
                             "next_run": next_run.strftime("%Y-%m-%d %H:%M:%S")
@@ -416,11 +449,11 @@ class PublishPage:
             
             # Setup new scheduler
             if schedule_type == "Frequency":
-                freq_str = frequency if frequency else "6 hours"
-                hours = int(freq_str.split()[0])
-                job = self.scheduler.every(hours).hours.do(monitor_and_publish)
+                # Updated to use minutes instead of hours
+                minutes = int(frequency)
+                job = self.scheduler.every(minutes).minutes.do(monitor_and_publish)
                 job.tag("auto_publish")
-                print(f"✅ Scheduled to run every {hours} hours")
+                print(f"✅ Scheduled to run every {minutes} minutes")
             else:
                 for time_str in times:
                     job = self.scheduler.every().day.at(time_str).do(monitor_and_publish)
@@ -429,9 +462,8 @@ class PublishPage:
             
             # Calculate and update next run time
             if schedule_type == "Frequency":
-                freq_str = frequency if frequency else "6 hours"
-                hours = int(freq_str.split()[0])
-                next_run = datetime.now() + timedelta(hours=hours)
+                minutes = int(frequency)
+                next_run = datetime.now() + timedelta(minutes=minutes)
             else:
                 # Find the next scheduled time
                 now = datetime.now()
@@ -657,21 +689,16 @@ class PublishPage:
     def publish_product(self, product):
         """Common function to publish a product"""
         try:
-            # Prepare product message
-            message = (
-                f"🛍️ {product.get('product_name', 'Product')}\n"
-                f"💰 Deal Price: ₹{product.get('Product_current_price', 'N/A')}\n"
-                f"💸 MRP: ₹{product.get('Product_Buy_box_price', 'N/A')}\n"
-                f"🔗 [Buy Now]({product.get('product_Affiliate_url', '#')})"
-            )
+            # Initialize publisher if needed
+            if not hasattr(self, 'notification_publisher'):
+                self.notification_publisher = NotificationPublisher(self.config_manager)
+            
+            # Generate formatted message using the centralized format function
+            message = self.notification_publisher.format_product_message(product)
             
             # List to track successful channels
             channels = []
             errors = []
-            
-            # Initialize publisher if needed
-            if not hasattr(self, 'notification_publisher'):
-                self.notification_publisher = NotificationPublisher(self.config_manager)
             
             # Send to Telegram
             telegram_success, telegram_error = self.notification_publisher.telegram_push(message, product.get("Product_image_path"))
@@ -682,7 +709,9 @@ class PublishPage:
                 print(f"❌ Telegram push failed: {telegram_error}")  # Print to console
             
             # Send to WhatsApp channels
-            whatsapp_channel_names = self.config_manager.get_whatsapp_config().get("channel_names", "")
+            whatsapp_config = self.config_manager.get_whatsapp_config()
+            whatsapp_channel_names = whatsapp_config.get("channel_names", "") if whatsapp_config else ""
+            
             if whatsapp_channel_names:
                 # Initialize WhatsApp sender for fresh session
                 try:
@@ -706,19 +735,19 @@ class PublishPage:
                         except Exception as e:
                             errors.append(f"WhatsApp channel error: {str(e)}")
                             print(f"❌ WhatsApp channel error: {str(e)}")
-                            
-                        # Close the driver after each channel to ensure clean state
-                        try:
-                            if hasattr(self.notification_publisher, 'whatsapp_sender'):
-                                self.notification_publisher.whatsapp_sender._save_cookies()
-                                if self.notification_publisher.whatsapp_sender.driver:
-                                    self.notification_publisher.whatsapp_sender.driver.quit()
-                                    self.notification_publisher.whatsapp_sender.driver = None
-                        except:
-                            pass
-            
+                    
+                    # Close the driver after each channel to ensure clean state
+                    try:
+                        if hasattr(self.notification_publisher, 'whatsapp_sender'):
+                            self.notification_publisher.whatsapp_sender._save_cookies()
+                            if self.notification_publisher.whatsapp_sender.driver:
+                                self.notification_publisher.whatsapp_sender.driver.quit()
+                                self.notification_publisher.whatsapp_sender.driver = None
+                    except:
+                        pass
+     
             # Send to WhatsApp groups
-            whatsapp_group_names = self.config_manager.get_whatsapp_config().get("group_names", "")
+            whatsapp_group_names = whatsapp_config.get("group_names", "") if whatsapp_config else ""
             if whatsapp_group_names:
                 # Initialize a fresh WhatsApp sender for groups
                 try:
@@ -753,100 +782,66 @@ class PublishPage:
                         except:
                             pass
             
-            # Update product status
-            products_data_update = {
+            # Update product status in database
+            self.db.update_product(product.get("Product_unique_ID"), {
                 "published_status": True,
                 "Publish": False,
                 "Publish_time": None,
                 "Last_published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "last_published_price": product.get("Product_current_price"),  # Store current price for future comparisons
                 "published_channels": channels
-            }
+            })
             
-            # Update database
-            self.db.update_product(product.get("Product_unique_ID"), products_data_update)
-            
-            # Record in published_products collection
-            published_data = {
+            # Record publication in published_products collection
+            self.db.db.published_products.insert_one({
                 "product_id": product.get("Product_unique_ID"),
                 "product_name": product.get("product_name"),
-                "published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "product_price": product.get("Product_current_price"),
+                "published_date": datetime.now(),
                 "channels": channels,
                 "message": message,
-                "product_price": product.get("Product_current_price"),
                 "errors": errors if errors else None
-            }
-            self.db.db.published_products.insert_one(published_data)
+            })
             
-            if errors:
-                return True, "Published with some errors: " + ", ".join(errors)
-            self._cleanup_whatsapp_drivers()  # Clean up all driver instances after publishing
-            return True, "Published successfully to " + ", ".join(channels)
+            # Clean up all driver instances
+            self._cleanup_whatsapp_drivers()
             
-        except Exception as e:
-            print(f"❌ Publishing error: {str(e)}")
-            return False, str(e)
-
-    def process_scheduled_publishing(self):
-        """Process products scheduled for publishing."""
-        now = datetime.now()
-        
-        # Get all products scheduled for current time
-        scheduled_products = self.db.get_products({
-            "Publish": True,
-            "published_status": {"$ne": True},
-            "Publish_time": {"$lte": now.strftime("%Y-%m-%d %H:%M:%S")}
-        })
-
-        if not scheduled_products:
-            print("No products scheduled for publishing.")
-            return
-
-        print(f"Found {len(scheduled_products)} products to publish")
-        
-        try:
-            # Process each product with delay to avoid rate limits
-            for product in scheduled_products:
-                success, message = self.publish_product(product)
-                if success:
-                    print(f"✅ Published: {product['product_name']}")
-                else:
-                    print(f"❌ Failed to publish {product['product_name']}: {message}")
-                
-                # Add delay between products to avoid rate limits
-                time.sleep(5)  # 5 second delay between products
+            # Return success if at least one channel worked
+            if channels:
+                return True, f"Published to {', '.join(channels)}"
+            else:
+                return False, f"Failed to publish to any channels: {'; '.join(errors)}"
                 
         except Exception as e:
-            print(f"Error in scheduled publishing: {e}")
-
+            print(f"❌ Error in publish_product: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
     def _cleanup_whatsapp_drivers(self):
-        """Kill all active WhatsApp driver instances stored in session state"""
-        # First clean up session state drivers
-        if 'whatsapp_drivers' in st.session_state:
-            for driver in st.session_state.whatsapp_drivers:
-                try:
-                    if driver:
-                        driver.quit()
-                        print("WhatsApp driver instance closed from session state")
-                except Exception as e:
-                    print(f"Error closing session state driver: {e}")
-            st.session_state.whatsapp_drivers = []
+        """Clean up any WhatsApp web driver instances that might be in session state"""
+        try:
+            # Clean up session state drivers if they exist
+            if 'whatsapp_drivers' in st.session_state:
+                for driver in st.session_state.whatsapp_drivers:
+                    try:
+                        if driver:
+                            driver.quit()
+                            print("WhatsApp driver instance closed from session state")
+                    except Exception as e:
+                        print(f"Error closing driver: {e}")
+                st.session_state.whatsapp_drivers = []
         
-        # Then clean up notification publisher driver if it exists
-        if hasattr(self, 'notification_publisher') and hasattr(self.notification_publisher, 'whatsapp_sender'):
-            try:
-                if self.notification_publisher.whatsapp_sender and hasattr(self.notification_publisher.whatsapp_sender, 'driver'):
-                    if self.notification_publisher.whatsapp_sender.driver:
-                        self.notification_publisher.whatsapp_sender.driver.quit()
-                        self.notification_publisher.whatsapp_sender.driver = None
-                        print("WhatsApp sender driver closed")
-            except Exception as e:
-                print(f"Error closing notification publisher driver: {e}")
+            # Also make sure the notification_publisher's WhatsApp sender is cleaned up
+            if hasattr(self, 'notification_publisher') and hasattr(self.notification_publisher, '_whatsapp_sender') and self.notification_publisher._whatsapp_sender:
+                try:
+                    # Save cookies before closing for session persistence
+                    sender = self.notification_publisher._whatsapp_sender
+                    if sender and hasattr(sender, 'driver') and sender.driver:
+                        sender._save_cookies()
+                        sender.driver.quit()
+                        sender.driver = None
+                except Exception as e:
+                    print(f"Error closing WhatsApp driver: {e}")
+        except Exception as e:
+            print(f"Error in cleanup: {e}")
 
-def run_scheduler():
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
 
-scheduler_thread = Thread(target=run_scheduler, daemon=True)
-scheduler_thread.start()

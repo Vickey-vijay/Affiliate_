@@ -41,10 +41,10 @@ def main():
 
     with st.sidebar:
         st.markdown("### Navigation")
-        page = st.selectbox(
-            "Select Page",
-            options=["Dashboard", "Products", "Configuration", "Product Monitor", "Publish"],
-            index=0
+        page = st.radio(
+        "Select Page",
+        options=["Dashboard", "Products", "Configuration", "Product Monitor", "Publish"],
+        index=0
         )
 
 

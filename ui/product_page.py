@@ -9,8 +9,9 @@ from notification_publisher import NotificationPublisher  # Add this import
 class ProductPage:
     def __init__(self, config):
         self.config = config
+        self.config_manager = config  # Add this line to make config_manager available
         self.db = DataManager()
-        self.notification_publisher = NotificationPublisher(config)  # Ensure proper initialization
+        self.notification_publisher = NotificationPublisher(config)  # This stays the same
     
     def render(self):
         st.title("Manage Products")
@@ -708,37 +709,39 @@ class ProductPage:
         """
         Process products scheduled for publishing.
         """
-        st.header("Scheduled Publishing Processor")
-
+        # Get current time
         now = datetime.now()
-        scheduled_products = self.db.get_products({
-            "Publish": True,
-            "Publish_time": {"$lte": now.strftime("%Y-%m-%d %H:%M:%S")}
-        })
-
+        
+        # Initialize notification publisher if needed
+        if not hasattr(self, 'notification_publisher'):
+            self.notification_publisher = NotificationPublisher(self.config_manager)
+        
+        # Find products scheduled for publishing
+        scheduled_products = list(self.db.get_products({"Publish": True}))
+        
         if not scheduled_products:
-            st.info("No products scheduled for publishing.")
             return
-
-        st.write(f"Found {len(scheduled_products)} products scheduled for publishing.")
-
+            
         for product in scheduled_products:
             product_id = product.get("Product_unique_ID")
-            product_name = product.get("product_name", "Unnamed Product")
+            product_name = product.get("product_name")
             publish_time = product.get("Publish_time")
+            
             try:
-                message = (
-                    f"🛍️ *{product_name}*\n"
-                    f"💰 *Current Price:* ₹{product.get('Product_current_price', 'N/A')}\n"
-                    f"💸 *MRP:* ₹{product.get('Product_Buy_box_price', 'N/A')}\n"
-                    f"🔗 [Buy Now]({product.get('product_Affiliate_url', '#')})"
-                )
+                if publish_time:
+                    publish_dt = datetime.strptime(publish_time, "%Y-%m-%d %H:%M:%S")
+                    if publish_dt > now:
+                        continue  # Skip if scheduled for future
+                
+                # Generate formatted message using our centralized format function
+                message = self.notification_publisher.format_product_message(product)
+                
                 telegram_success, telegram_error = self.notification_publisher.telegram_push(message)
                 if not telegram_success:
                     raise Exception(f"Telegram Error: {telegram_error}")
 
                 whatsapp_group = self.notification_publisher.email_config.get("whatsapp_group_name", "Default Group")
-                self.notification_publisher.whatsapp_push(product, whatsapp_group)
+                self.notification_publisher.whatsapp_push(product, whatsapp_group, message)
 
                 self.db.update_product(product_id, {
                     "Publish": False,
