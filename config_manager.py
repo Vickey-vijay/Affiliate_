@@ -68,14 +68,59 @@ class ConfigManager:
         return dict(self.config['Amazon'])
 
     def get_telegram_config(self) -> dict:
-        """
-        Retrieves the Telegram configuration settings.
-        :return: A dictionary of Telegram settings.
-        """
-        return {
-            "bot_token": self.config["Telegram"].get("bot_token"),
-            "channel_name": self.config["Telegram"].get("channel_name")  
-        }
+        """Get Telegram configuration from either the flat structure or nested structure."""
+        result = {}
+        
+        # Try to read from INI file first
+        if "Telegram" in self.config:
+            bot_token = self.config["Telegram"].get("bot_token", "")
+            group_ids_str = self.config["Telegram"].get("group_ids", "")
+            result = {
+                "bot_token": bot_token,
+                "channel_ids": {}
+            }
+            
+            # Parse group IDs from comma-separated string
+            if group_ids_str:
+                for idx, group_id in enumerate(group_ids_str.split(",")):
+                    channel_name = f"channel_{idx+1}"
+                    result["channel_ids"][channel_name] = group_id.strip()
+    
+        # Fall back to JSON config or enhance from JSON config
+        if self.json_config:
+            # Check flat structure (as currently in your config.json)
+            if "telegram_bot_token" in self.json_config:
+                result["bot_token"] = self.json_config.get("telegram_bot_token", "")
+                chat_id = self.json_config.get("telegram_chat_id", "")
+                
+                if chat_id and "channel_ids" not in result:
+                    result["channel_ids"] = {}
+                    
+                if chat_id:
+                    channel_name = chat_id if chat_id.startswith("@") else "default_channel"
+                    result["channel_ids"][channel_name] = chat_id
+                    
+            # Also check nested structure for future compatibility
+            elif "telegram" in self.json_config:
+                telegram_config = self.json_config["telegram"]
+                result["bot_token"] = telegram_config.get("bot_token", result.get("bot_token", ""))
+                
+                # Check if chat_id exists in nested config
+                if "chat_id" in telegram_config:
+                    chat_id = telegram_config["chat_id"]
+                    if "channel_ids" not in result:
+                        result["channel_ids"] = {}
+                        
+                    channel_name = chat_id if chat_id.startswith("@") else "default_channel"
+                    result["channel_ids"][channel_name] = chat_id
+                    
+                # Check if channel_ids exists in nested config
+                if "channel_ids" in telegram_config:
+                    if "channel_ids" not in result:
+                        result["channel_ids"] = {}
+                    result["channel_ids"].update(telegram_config["channel_ids"])
+    
+        return result
 
     
     def get_whatsapp_config(self) -> dict:

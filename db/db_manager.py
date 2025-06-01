@@ -246,27 +246,14 @@ class DataManager:
             print(f"Error retrieving notification schedule: {e}")
             return None
 
-    def save_auto_publish_config(self, config):
-        """Save automatic publishing configuration to database"""
-        try:
-            self.db.auto_publish_config.update_one(
-                {"_id": "current"},
-                {"$set": {
-                    **config,
-                    "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }},
-                upsert=True
-            )
-            return True
-        except Exception as e:
-            print(f"Error saving auto publish config: {e}")
-            return False
-
     def get_auto_publish_config(self):
-        """Retrieve current automatic publishing configuration"""
-        try:
-            config = self.db.auto_publish_config.find_one({"_id": "current"})
-            return config if config else {}
-        except Exception as e:
-            print(f"Error retrieving auto publish config: {e}")
-            return {}
+        """Get automatic publishing configuration"""
+        config = self.db.auto_publish_config.find_one({}) or {}
+        return config
+
+    def save_auto_publish_config(self, config):
+        """Save automatic publishing configuration"""
+        if self.db.auto_publish_config.count_documents({}) > 0:
+            self.db.auto_publish_config.update_one({}, {"$set": config})
+        else:
+            self.db.auto_publish_config.insert_one(config)

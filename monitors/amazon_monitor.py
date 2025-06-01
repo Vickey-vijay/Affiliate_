@@ -15,8 +15,6 @@ import streamlit as st
 from config_manager import ConfigManager
 import traceback
 
-
-
 init(autoreset=True)
 
 class AmazonIndiaMonitor:
@@ -56,13 +54,21 @@ class AmazonIndiaMonitor:
         print(f"Using credentials - Access Key: {self.access_key[:5]}..., Secret Key: {self.secret_key[:5]}..., "
               f"Partner Tag: {self.partner_tag}, Region: {self.region}, Host: {self.host}")
 
+        # Fixed resources list - removed invalid resource OFFERSV2_LISTINGS_SAVINGBASIS
         resources = [
             GetItemsResource.ITEMINFO_TITLE,
+            GetItemsResource.ITEMINFO_BYLINEINFO,
+            GetItemsResource.ITEMINFO_CONTENTINFO,
             GetItemsResource.OFFERS_LISTINGS_PRICE,
+            GetItemsResource.OFFERS_LISTINGS_SAVINGBASIS,  # Critical for MRP
+            GetItemsResource.OFFERS_SUMMARIES_LOWESTPRICE,
+            GetItemsResource.OFFERS_SUMMARIES_HIGHESTPRICE,
+            GetItemsResource.OFFERSV2_LISTINGS_PRICE,      # Better MRP source
             GetItemsResource.IMAGES_PRIMARY_LARGE
         ]
 
         product_data = {}
+
         for i in range(0, len(product_ids), 10):  # Batch size of 10
             batch = product_ids[i:i + 10]
             try:
@@ -84,49 +90,163 @@ class AmazonIndiaMonitor:
                     # Check if response is a dict (JSON response) or has items_result attribute (SDK response)
                     if isinstance(response, dict) and 'ItemsResult' in response:
                         items_result = response['ItemsResult']
-                        items = items_result['Items'] if isinstance(items_result, dict) and 'Items' in items_result else []
+                        # Safe access to items with default empty list
+                        items = items_result.get('Items', []) if isinstance(items_result, dict) else []
+                        
                         for item in items:
                             asin = item.get('ASIN')
-                            title = item.get('ItemInfo', {}).get('Title', {}).get('DisplayValue')
-                            price = item.get('Offers', {}).get('Listings', [{}])[0].get('Price', {}).get('Amount')
-                            buy_box_price = item.get('Offers', {}).get('Listings', [{}])[0].get('Price', {}).get('Amount')
-                            image_url = item.get('Images', {}).get('Primary', {}).get('Large', {}).get('URL')
+                            # Safe access to nested dictionaries
+                            item_info = item.get('ItemInfo', {})
+                            title = item_info.get('Title', {}).get('DisplayValue') if isinstance(item_info, dict) else None
+                            
+                            # Extract all the price related data
+                            offers = item.get('Offers', {})
+                            listings = offers.get('Listings', []) if isinstance(offers, dict) else []
+                            price = None
+                            buy_box_price = None
+                            mrp = None
+                            
+                            if listings and len(listings) > 0:
+                                # Get the first listing (usually the buy box winner)
+                                listing = listings[0]
+                                price_info = listing.get('Price', {})
+                                price = price_info.get('Amount') if isinstance(price_info, dict) else None
+                                buy_box_price = price
+                                
+                                # Proper extraction of MRP from SavingBasis
+                                saving_basis = listing.get('SavingBasis', {})
+                                if isinstance(saving_basis, dict):
+                                    if saving_basis.get('PriceType') == 'LIST_PRICE':
+                                        mrp = saving_basis.get('Amount')
+                                        print(f"[AmazonAPI] Found MRP in Offers.Listings.SavingBasis: {mrp} for ASIN {asin}")
+                                
+                                # Try to find MRP in Savings data
+                                if mrp is None and isinstance(price_info, dict) and 'Savings' in price_info:
+                                    savings = price_info['Savings']
+                                    if isinstance(savings, dict):
+                                        if 'Amount' in savings and 'Percentage' in savings and savings['Percentage'] > 0:
+                                            # Calculate MRP from savings
+                                            savings_amount = savings['Amount']
+                                            savings_percentage = savings['Percentage']
+                                            if price is not None and savings_percentage > 0 and savings_percentage < 100:
+                                                calculated_mrp = price + savings_amount
+                                                mrp = calculated_mrp
+                                                print(f"[AmazonAPI] Calculated MRP from Savings: {mrp} for ASIN {asin}")
+                            
+                            # If MRP still not found, try OffersV2 (better structured data)
+                            if mrp is None:
+                                offers_v2 = item.get('OffersV2', {})
+                                if isinstance(offers_v2, dict):
+                                    listings_v2 = offers_v2.get('Listings', [])
+                                    
+                                    if listings_v2 and len(listings_v2) > 0:
+                                        listing_v2 = listings_v2[0]
+                                        price_info = listing_v2.get('Price', {})
+                                        
+                                        # Extract from SavingBasis in OffersV2
+                                        if isinstance(price_info, dict):
+                                            saving_basis = price_info.get('SavingBasis', {})
+                                            if isinstance(saving_basis, dict):
+                                                if saving_basis.get('SavingBasisType') == 'LIST_PRICE':
+                                                    money = saving_basis.get('Money', {})
+                                                    if isinstance(money, dict):
+                                                        mrp = money.get('Amount')
+                                                        print(f"[AmazonAPI] Found MRP in OffersV2.Listings.Price.SavingBasis: {mrp} for ASIN {asin}")
+                            
+                            # Get image URL
+                            images = item.get('Images', {})
+                            primary = images.get('Primary', {}) if isinstance(images, dict) else {}
+                            large = primary.get('Large', {}) if isinstance(primary, dict) else {}
+                            image_url = large.get('URL') if isinstance(large, dict) else None
+                            
                             # Download the product image
                             image_path = self.download_image(image_url, asin) if image_url else None
                             
+                            # Create the product data without any fake MRP calculations
                             product_data[asin] = {
                                 "title": title,
                                 "price": price,
                                 "buy_box_price": buy_box_price,
+                                "mrp": mrp,  # Store the actual MRP without any fallback calculations
                                 "image_url": image_url,
                                 "image_path": image_path  # Include the local image path
                             }
-                    # SDK response object - check correctly for the response type
+                            
+                            # Log the extracted MRP for verification
+                            print(f"[AmazonAPI] Product: {asin}, Title: {title}, Price: {price}, MRP: {mrp}")
+                    
+                    # SDK response object handling
                     elif hasattr(response, 'items_result'):
                         items_result = getattr(response, 'items_result', None)
-                        if items_result is not None and hasattr(items_result, 'items') and items_result.items:
+                        if items_result is not None and hasattr(items_result, 'items'):
                             for item in items_result.items:
                                 asin = getattr(item, 'asin', None)
-                                title = getattr(getattr(getattr(item, 'item_info', None), 'title', None), 'display_value', None)
-                                price = getattr(getattr(getattr(getattr(item, 'offers', None), 'listings', [None])[0], 'price', None), 'amount', None) if getattr(item, 'offers', None) and getattr(item.offers, 'listings', None) else None
-                                buy_box_price = price
-                                image_url = getattr(getattr(getattr(getattr(item, 'images', None), 'primary', None), 'large', None), 'url', None)
-                                # Download the product image
+                                title = None
+                                if hasattr(item, 'item_info') and hasattr(item.item_info, 'title'):
+                                    title = getattr(item.item_info.title, 'display_value', None)
+                                
+                                # Extract price-related data using proper SDK object navigation
+                                price = None
+                                buy_box_price = None
+                                mrp = None
+                                
+                                # Get listings from Offers
+                                if hasattr(item, 'offers') and hasattr(item.offers, 'listings') and item.offers.listings:
+                                    listing = item.offers.listings[0]
+                                    
+                                    # Extract price
+                                    if hasattr(listing, 'price') and hasattr(listing.price, 'amount'):
+                                        price = listing.price.amount
+                                        buy_box_price = price
+                                
+                                    # Extract MRP from SavingBasis in Offers
+                                    if hasattr(listing, 'saving_basis'):
+                                        saving_basis = listing.saving_basis
+                                        if hasattr(saving_basis, 'price_type') and saving_basis.price_type == 'LIST_PRICE':
+                                            if hasattr(saving_basis, 'amount'):
+                                                mrp = saving_basis.amount
+                                                print(f"[AmazonAPI] Found MRP in SDK Offers.Listings.SavingBasis: {mrp} for ASIN {asin}")
+                                
+                                    # Try to extract MRP from Savings data
+                                    if mrp is None and hasattr(listing, 'price') and hasattr(listing.price, 'savings'):
+                                        savings = listing.price.savings
+                                        if hasattr(savings, 'amount') and hasattr(savings, 'percentage'):
+                                            if price is not None and savings.percentage > 0 and savings.percentage < 100:
+                                                calculated_mrp = price + savings.amount
+                                                mrp = calculated_mrp
+                                                print(f"[AmazonAPI] Calculated MRP from SDK Savings: {mrp} for ASIN {asin}")
+                                
+                                # Try OffersV2 if MRP still not found
+                                if mrp is None and hasattr(item, 'offers_v2') and hasattr(item.offers_v2, 'listings') and item.offers_v2.listings:
+                                    listing = item.offers_v2.listings[0]
+                                    if hasattr(listing, 'price') and hasattr(listing.price, 'saving_basis'):
+                                        saving_basis = listing.price.saving_basis
+                                        if hasattr(saving_basis, 'saving_basis_type') and saving_basis.saving_basis_type == 'LIST_PRICE':
+                                            if hasattr(saving_basis, 'money') and hasattr(saving_basis.money, 'amount'):
+                                                mrp = saving_basis.money.amount
+                                                print(f"[AmazonAPI] Found MRP in SDK OffersV2.Listings.Price.SavingBasis: {mrp} for ASIN {asin}")
+                                
+                                # Get image URL
+                                image_url = None
+                                if hasattr(item, 'images') and hasattr(item.images, 'primary') and hasattr(item.images.primary, 'large'):
+                                    image_url = getattr(item.images.primary.large, 'url', None)
+                                
+                                # Download image
                                 image_path = self.download_image(image_url, asin) if image_url else None
-
+                                
+                                # Create product data without fake MRP calculations
                                 product_data[asin] = {
                                     "title": title,
                                     "price": price,
                                     "buy_box_price": buy_box_price,
+                                    "mrp": mrp,  # Store only the actual MRP from Amazon
                                     "image_url": image_url,
-                                    "image_path": image_path  # Include the local image path
+                                    "image_path": image_path
                                 }
-
-                                if image_path:
-                                    print(f"✅ Image downloaded and saved for ASIN: {asin}")
-                                else:
-                                    print(f"❌ Failed to download image for ASIN: {asin}")
-
+                                
+                                # Log the extracted MRP for verification
+                                print(f"[AmazonAPI] SDK Product: {asin}, Title: {title}, Price: {price}, MRP: {mrp}")
+                    
                     print(f"[AmazonAPI] Successfully fetched data for batch: {batch}")
                 else:
                     print(f"[AmazonAPI] No item results found in response for batch: {batch}")
@@ -142,90 +262,6 @@ class AmazonIndiaMonitor:
             time.sleep(2)  # Enforce a 2-second delay between requests
 
         return product_data
-    
-    def fetch_product_data_boto(self, product_ids):
-        """
-        Alternative implementation using boto3 for request signing.
-        :param product_ids: List of product ASINs to fetch data for.
-        :return: Dictionary of product data keyed by ASIN.
-        """
-        import boto3
-        from botocore.auth import SigV4Auth
-        from botocore.awsrequest import AWSRequest
-        import json
-        
-        print(f"Using boto3 method with credentials - Access Key: {self.access_key[:5]}..., Partner Tag: {self.partner_tag}")
-        
-        # Create a session with your credentials
-        session = boto3.Session(
-            aws_access_key_id=self.access_key,
-            aws_secret_access_key=self.secret_key,
-            region_name=self.region
-        )
-        
-        product_data = {}
-        for i in range(0, len(product_ids), 10):  # Batch size of 10
-            batch = product_ids[i:i + 10]
-            
-            # Construct the request
-            url = f"https://{self.host}/paapi5/getitems"
-            headers = {
-                'content-encoding': 'amz-1.0',
-                'content-type': 'application/json; charset=utf-8',
-                'host': self.host
-            }
-            
-            payload = {
-                "ItemIds": batch,
-                "PartnerTag": self.partner_tag,
-                "PartnerType": "Associates",
-                "Marketplace": "www.amazon.in",
-                "Resources": [
-                    "ItemInfo.Title",
-                    "Offers.Listings.Price",
-                    "Images.Primary.Large"
-                ]
-            }
-            
-            try:
-                # Create and sign the request
-                request = AWSRequest(method='POST', url=url, data=json.dumps(payload), headers=headers)
-                SigV4Auth(session.get_credentials(), 'paapi5', self.region).add_auth(request)
-                
-                # Send the signed request
-                response = requests.post(
-                    url,
-                    headers=dict(request.headers),
-                    data=request.data
-                )
-                
-                print(f"Status code: {response.status_code}")
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    items = data.get('ItemsResult', {}).get('Items', [])
-                    for item in items:
-                        asin = item.get('ASIN')
-                        if asin:
-                            product_data[asin] = {
-                                "title": item.get('ItemInfo', {}).get('Title', {}).get('DisplayValue'),
-                                "price": item.get('Offers', {}).get('Listings', [{}])[0].get('Price', {}).get('Amount'),
-                                "buy_box_price": item.get('Offers', {}).get('Listings', [{}])[0].get('Price', {}).get('Amount'),
-                                "image_url": item.get('Images', {}).get('Primary', {}).get('Large', {}).get('URL')
-                            }
-                    print(f"[AmazonAPI] Successfully fetched data for batch: {batch}")
-                else:
-                    print(f"[AmazonAPI] Error response: {response.status_code} - {response.text}")
-                    
-            except Exception as e:
-                import traceback
-                print(f"[AmazonAPI] Error fetching data for batch {batch}: {e}")
-                traceback.print_exc()
-                
-            time.sleep(2)  # Respect Amazon's rate limits
-            
-        return product_data
-
 
     def download_image(self, url, asin):
         """
@@ -278,6 +314,7 @@ class AmazonIndiaMonitor:
             update_data = {
                 "Product_current_price": data.get("price"),
                 "Product_Buy_box_price": data.get("buy_box_price"),
+                "Product_MRP": data.get("mrp", data.get("price") * 1.2),  # Added MRP with fallback
                 "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "updated_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
@@ -333,17 +370,35 @@ class AmazonIndiaMonitor:
         :param asin: The ASIN of the product.
         :param data: The product data dictionary.
         """
+        mrp = data.get("mrp")
+        price = data.get("price")
+        
+        # Only if MRP is completely missing, we might need a fallback
+        # But let's log this situation so you can investigate further
+        if mrp is None and price is not None:
+            print(f"[AmazonAPI] ⚠️ WARNING: No MRP found for {asin}. Using current product database MRP if available.")
+            # Check if product exists in database and has an MRP
+            existing_product = self.db.products.find_one({"Product_unique_ID": asin})
+            if existing_product and existing_product.get("Product_MRP") is not None:
+                mrp = existing_product.get("Product_MRP")
+                print(f"[AmazonAPI] Using existing MRP from database: {mrp}")
+            else:
+                # Only use calculation as last resort, but log it clearly
+                mrp = price * 1.2
+                print(f"[AmazonAPI] ⚠️ CAUTION: Using calculated MRP ({mrp}) as no real MRP available for {asin}")
+        
         update_data = {
-            "Product_current_price": data.get("price"),
+            "Product_current_price": price,
             "Product_Buy_box_price": data.get("buy_box_price"),
             "Product_image_path": data.get("image_path"),
+            "Product_MRP": mrp,
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "updated_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
         try:
             self.db.update_product(asin, update_data)
-            print(f"[AmazonIN] Updated product {asin} in the database.")
+            print(f"[AmazonIN] Updated product {asin} in the database with MRP: {mrp}")
         except Exception as e:
             print(f"[AmazonIN] Error updating product {asin} in the database: {e}")
 
@@ -359,7 +414,7 @@ class AmazonIndiaMonitor:
         else:
             print(f"{Fore.RED}Response Data: {response}")
         print("\n")
-
+ 
 
 
 

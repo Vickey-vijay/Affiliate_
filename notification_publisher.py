@@ -78,40 +78,108 @@ class NotificationPublisher:
             return {"bot_token": None, "channel_name": None}
 
     def telegram_push(self, message, image_path=None):
-        """Send notification to Telegram channel"""
+        """
+        Send a message to Telegram channel with improved debugging.
+        
+        Args:
+            message (str): Message to send
+            image_path (str, optional): Path to image file
+            
+        Returns:
+            tuple: (success, error_message)
+        """
         try:
-            if not self.telegram_config:
-                return False, "No configuration available"
+            # Debug: Print the function inputs
+            print(f"[DEBUG] telegram_push called with message length: {len(message)}")
+            if image_path:
+                print(f"[DEBUG] Image path provided: {image_path} (exists: {os.path.exists(image_path) if image_path else 'N/A'})")
+                
+            telegram_config = self.config_manager.get_telegram_config()
             
-            # Extract Telegram configuration - use correct field names based on your config structure
-            bot_token = self.telegram_config.get("bot_token", "")
-            chat_id = self.telegram_config.get("channel_name", "")
+            if not telegram_config:
+                print("[Telegram] No configuration found")
+                return False, "No Telegram configuration found"
+                
+            # Debug: Print the configuration
+            print(f"[DEBUG] Telegram config: {telegram_config}")
             
-            if not bot_token or not chat_id:
-                return False, "Telegram configuration is missing"
+            # Get the bot token
+            bot_token = telegram_config.get("bot_token")
+            if not bot_token:
+                print("[Telegram] No bot token configured")
+                return False, "No bot token configured"
+                
+            # Get the channel IDs
+            channel_ids = telegram_config.get("channel_ids", {})
+            if not channel_ids:
+                print("[Telegram] No channels configured")
+                return False, "No channels configured"
+                
+            print(f"[DEBUG] Found {len(channel_ids)} channel(s) configured: {list(channel_ids.keys())}")
             
-            # Send the message
-            if image_path and os.path.exists(image_path):
-                # Send with image
-                with open(image_path, 'rb') as image:
-                    files = {'photo': image}
-                    response = requests.post(
-                        f"https://api.telegram.org/bot{bot_token}/sendPhoto",
-                        data={"chat_id": chat_id, "caption": message, "parse_mode": "HTML"},
-                        files=files
-                    )
-            else:
-                # Send text only
-                response = requests.post(
-                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                    data={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-                )
+            channels = []
+            errors = []
             
-            if response.status_code != 200:
-                return False, f"Error {response.status_code}: {response.text}"
-            
-            return True, "Message sent successfully"
+            # Process all configured channels
+            for channel_name, channel_id in channel_ids.items():
+                try:
+                    print(f"[Telegram] Sending message to channel: {channel_name} (ID: {channel_id})")
+                    
+                    # Prepare API URL
+                    api_url = f"https://api.telegram.org/bot{bot_token}/"
+                    
+                    # If we have an image, send photo with caption
+                    if image_path and os.path.exists(image_path):
+                        with open(image_path, 'rb') as photo:
+                            # Send photo with caption
+                            url = api_url + "sendPhoto"
+                            files = {'photo': photo}
+                            data = {
+                                'chat_id': channel_id,
+                                'caption': message,
+                                'parse_mode': 'HTML'
+                            }
+                            print(f"[DEBUG] Sending photo with caption to {url}")
+                            response = requests.post(url, files=files, data=data)
+                    else:
+                        # Send just text message
+                        url = api_url + "sendMessage"
+                        data = {
+                            'chat_id': channel_id,
+                            'text': message,
+                            'parse_mode': 'HTML',
+                            'disable_web_page_preview': False
+                        }
+                        print(f"[DEBUG] Sending text message to {url}")
+                        response = requests.post(url, json=data)
+                    
+                    # Check response
+                    print(f"[DEBUG] Response status code: {response.status_code}")
+                    print(f"[DEBUG] Response content: {response.text[:200]}")
+                    
+                    if response.status_code == 200:
+                        print(f"[Telegram] Successfully sent message to {channel_name}")
+                        channels.append(channel_name)
+                    else:
+                        error_message = response.json().get("description", f"Error {response.status_code}")
+                        print(f"[Telegram] Failed to send to {channel_name}: {error_message}")
+                        print(f"[Telegram] Response: {response.text}")
+                        errors.append(f"{channel_name}: {error_message}")
+                        
+                except Exception as e:
+                    print(f"[Telegram] Exception while sending to {channel_name}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    errors.append(f"{channel_name}: {str(e)}")
+        
+            if errors:
+                return len(channels) > 0, "; ".join(errors)
+            return True, None
+        
         except Exception as e:
+            print(f"[Telegram] General error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False, str(e)
 
     def test_telegram_config(self, bot_token: str, channel_names: str):
@@ -243,20 +311,35 @@ class NotificationPublisher:
             current_price = int(float(product.get("Product_current_price", 0)))
         except (ValueError, TypeError):
             current_price = "N/A"
-        
+
+        # Use Product_MRP for MRP value, fallback to Buy_box_price if not available
         try:
-            buy_box_price = int(float(product.get("Product_Buy_box_price", 0)))
-        except (ValueError, TypeError):
-            buy_box_price = "N/A"
+            # First try to get the MRP from the dedicated field
+            mrp = product.get("Product_MRP")
             
+            # If it's None or the same as current price, try other options
+            if mrp is None or mrp == current_price:
+                mrp = product.get("Product_Buy_box_price")
+                
+            # If still None or equal to current price, calculate it
+            if mrp is None or mrp == current_price:
+                mrp = int(float(current_price) * 1.2)
+            else:
+                # Convert to int if it's not None
+                mrp = int(float(mrp))
+                
+        except (ValueError, TypeError):
+            # Fallback if conversion fails
+            mrp = int(float(current_price) * 1.2) if isinstance(current_price, (int, float)) else "N/A"
+        
         buy_now_url = product.get("product_Affiliate_url", "#")
         
         # Format message with aligned colons and proper spacing
         message = (
             f"🛍️ {title}\n\n"
-            f"💰 Deal Price  : ₹ <b>{current_price}</b> ✅\n"
-            f"💸 MRP         : ₹ {buy_box_price} ❌\n\n"
-            f"🔗 <b>Buy Now</b>    : {buy_now_url}"
+            f"💰 Deal Price  : ₹ {current_price} ✅\n"
+            f"💸 MRP          : ₹ {mrp} ❌\n\n"
+            f"🔗 Buy Now     : {buy_now_url}"
         )
         return message
 

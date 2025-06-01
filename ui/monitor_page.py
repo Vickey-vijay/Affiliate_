@@ -6,32 +6,42 @@ from notification.notification_manager import NotificationManager
 from urllib.parse import urlparse
 from monitors.amazon_monitor import AmazonIndiaMonitor
 from utils.monitor_utils import save_logs_to_file, get_products_for_notification
-from utils.scheduler_manager import start_scheduler, stop_scheduler
 import os
-import json
-import schedule
-import threading
-import time
-import random
-import pandas as pd
-from datetime import datetime, timedelta
-from streamlit.runtime.scriptrunner import get_script_run_ctx
-from streamlit.runtime.scriptrunner.script_run_context import add_script_run_ctx
-from utils.monitor_utils import (
-    save_logs_to_file, 
-    get_products_for_notification, 
-    restore_saved_schedule  
-)
+import uuid
+import traceback
+import sys
 
-
-if 'monitoring_active' not in st.session_state:
-    st.session_state.monitoring_active = False
-if 'monitor_thread' not in st.session_state:
-    st.session_state.monitor_thread = None
-if 'script_run_ctx' not in st.session_state:
-    st.session_state.script_run_ctx = get_script_run_ctx()
+# Initialize session state variables - use the dictionary style access to ensure it works
+if "log_text" not in st.session_state:
+    st.session_state["log_text"] = ""
 
 os.makedirs("logs", exist_ok=True)
+
+# Global log container for displaying logs
+log_container = None
+log_display = None
+
+def update_log_display():
+    """Update the log text area in the UI with the current log content"""
+    global log_display
+    if log_display is not None:
+        # Use markdown instead of text_area to avoid creating interactive elements
+        log_display.markdown(f"""
+```
+{st.session_state["log_text"]}
+```
+""", unsafe_allow_html=True)
+
+def add_log(message):
+    """Add a message to the log with timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {message}\n"
+    # Use dictionary-style access for session_state
+    st.session_state["log_text"] += log_entry
+    
+    # Use sys.stdout.write instead of print to avoid recursion
+    sys.stdout.write(f"{message}\n")
+    sys.stdout.flush()
 
 def run_monitor_once_for_sites(sites):
     """
@@ -41,32 +51,23 @@ def run_monitor_once_for_sites(sites):
     db = DataManager()
     notification_manager = NotificationManager()
     
-    log_placeholder = st.empty()
-    log_text = "Starting price monitoring...\n"
+    add_log("Starting price monitoring...")
     
-    def update_log(message):
-        nonlocal log_text
-        log_text += message + "\n"
-        # Use a unique key by appending current time
-        log_placeholder.text_area("Log", log_text, height=300, key=f"log_area_{int(time.time()*1000)}")
-        
-        st.markdown("""
-            <script>
-                const textarea = document.querySelector('.stTextArea textarea:last-child');
-                if (textarea) {
-                    textarea.scrollTop = textarea.scrollHeight;
-                }
-            </script>
-            """, 
-            unsafe_allow_html=True
-        )
-    
+    # Save the original print function
     original_print_func = builtins.print
+    
+    # Define a new print function that doesn't use the add_log function
     def ui_print(*args, **kwargs):
         message = " ".join(str(arg) for arg in args)
-        update_log(message)
-        original_print_func(*args, **kwargs)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}\n"
+        # Use dictionary-style access for session_state
+        st.session_state["log_text"] += log_entry
+        # Don't call print or add_log here to avoid recursion
+        sys.stdout.write(f"{message}\n")
+        sys.stdout.flush()
     
+    # Replace the built-in print with our custom function
     builtins.print = ui_print
     
     total_products_checked = 0
@@ -77,66 +78,82 @@ def run_monitor_once_for_sites(sites):
     try:
         for site in sites:
             domain = urlparse(site).netloc if '://' in site else site
-            update_log(f"Working with site: {domain}")
+            add_log(f"Working with site: {domain}")
             
             if 'amazon.in' in domain.lower():
                 try:
-                    update_log("Querying products from database...")
+                    add_log("Querying products from database...")
                     
                     all_products = list(db.products.find({"product_Affiliate_site": site}))
                     if not all_products:
-                        update_log(f"No products found for site {site}. Trying with all products...")
+                        add_log(f"No products found for site {site}. Trying with all products...")
                         all_products = list(db.products.find({}))
                     
                     product_ids = [p.get("Product_unique_ID") for p in all_products if p.get("Product_unique_ID")]
                     
                     if not product_ids:
-                        update_log("⚠️ No product ASINs found in database!")
+                        add_log("⚠️ No product ASINs found in database!")
                         continue
                         
-                    update_log(f"Found {len(product_ids)} products to check")
-                    update_log(f"Sample ASINs: {product_ids[:5]}")
+                    add_log(f"Found {len(product_ids)} products to check")
+                    add_log(f"Sample ASINs: {product_ids[:5]}")
                     total_products_checked += len(product_ids)
                     
-                    update_log("Initializing Amazon monitor...")
+                    add_log("Initializing Amazon monitor...")
                     monitor = AmazonIndiaMonitor()
                     
-                    update_log(f"Using Amazon API credentials - Access key: {monitor.access_key[:4]}***, Tag: {monitor.partner_tag}")
+                    add_log(f"Using Amazon API credentials - Access key: {monitor.access_key[:4]}***, Tag: {monitor.partner_tag}")
                     
                     batch_size = 10
                     for i in range(0, len(product_ids), batch_size):
                         batch = product_ids[i:i+batch_size]
-                        update_log(f"Processing batch {i//batch_size + 1}/{(len(product_ids) + batch_size - 1)//batch_size}")
-                        update_log(f"Batch ASINs: {batch}")
+                        add_log(f"Processing batch {i//batch_size + 1}/{(len(product_ids) + batch_size - 1)//batch_size}")
+                        add_log(f"Batch ASINs: {batch}")
                         
                         try:
                             product_data = monitor.fetch_product_data(batch)
                             
                             if not product_data:
-                                update_log(f"⚠️ No data returned for batch {i//batch_size + 1}")
+                                add_log(f"⚠️ No data returned for batch {i//batch_size + 1}")
                                 failed_products += len(batch)
                                 continue
                             
-                            update_log(f"✅ Received data for {len(product_data)} products in batch")
+                            add_log(f"✅ Received data for {len(product_data)} products in batch")
                             
+                            # Make sure the MRP is being correctly calculated and stored during updates
                             for asin, data in product_data.items():
                                 current_product = db.products.find_one({"Product_unique_ID": asin})
                                 old_price = current_product.get("Product_current_price") if current_product else None
                                 
+                                price = data.get("price")
+                                mrp = data.get("mrp")
+                                
+                                # If mrp is None but price is available, calculate a default markup
+                                if mrp is None and price is not None:
+                                    mrp = price * 1.2  # Default 20% markup
+                                elif mrp is not None and price is not None and mrp <= price:
+                                    # Ensure MRP is higher than price (at least 5% higher)
+                                    mrp = price * 1.2
+                                
+                                # Round the MRP to 2 decimal places
+                                if mrp is not None:
+                                    mrp = round(mrp, 2)
+                                
                                 update_data = {
-                                    "Product_current_price": data.get("price"),
+                                    "Product_current_price": price,
                                     "Product_Buy_box_price": data.get("buy_box_price"),
+                                    "Product_MRP": mrp,  # Using the safely calculated mrp
                                     "Product_image_path": data.get("image_path", ""),
                                     "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                     "updated_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 }
-                                
+
                                 db.update_product(asin, update_data)
                                 successful_products += 1
-                                update_log(f"✅ Database updated for {asin}")
+                                add_log(f"✅ Database updated for {asin}")
                                 
                                 if old_price and data.get("price") and float(old_price) != float(data.get("price")):
-                                    update_log(f"💰 Price change detected for {asin}: {old_price} -> {data.get('price')}")
+                                    add_log(f"💰 Price change detected for {asin}: {old_price} -> {data.get('price')}")
                                     if current_product:
                                         price_changes.append(current_product)
                                         notification_manager.notify_price_change(
@@ -146,58 +163,53 @@ def run_monitor_once_for_sites(sites):
                                         )
                         
                         except Exception as batch_error:
-                            update_log(f"❌ Error processing batch: {str(batch_error)}")
+                            add_log(f"❌ Error processing batch: {str(batch_error)}")
                             failed_products += len(batch)
-                            import traceback
-                            update_log(traceback.format_exc())
+                            add_log(traceback.format_exc())
                     
-                    update_log(f"✅ Amazon monitoring completed: {successful_products} successful, {failed_products} failed")
-                    
+                    add_log(f"✅ Amazon monitoring completed: {successful_products} successful, {failed_products} failed")
                 except Exception as e:
-                    update_log(f"❌ Error during Amazon monitoring: {str(e)}")
-                    import traceback
-                    update_log(traceback.format_exc())
+                    add_log(f"❌ Error during Amazon monitoring: {str(e)}")
+                    add_log(traceback.format_exc())
             else:
-                update_log(f"⚠️ Site {domain} not fully implemented yet")
+                add_log(f"⚠️ Site {domain} not fully implemented yet")
         
-        update_log(f"🏁 Monitoring complete! Checked {total_products_checked} products, found {len(price_changes)} price changes.")
+        add_log(f"🏁 Monitoring complete! Checked {total_products_checked} products, found {len(price_changes)} price changes.")
         
         try:
             publish_candidates = get_products_for_notification(db)
-            update_log(f"Found {len(publish_candidates)} products that meet publishing criteria")
+            add_log(f"Found {len(publish_candidates)} products that meet publishing criteria")
             st.session_state["filter_results"] = publish_candidates
         except Exception as e:
-            update_log(f"❌ Error in filtering products: {str(e)}")
+            add_log(f"❌ Error in filtering products: {str(e)}")
             st.session_state["filter_results"] = []
         
-        
+        # No need to call this anymore since we update in add_log
+        # update_log_display()
                 
     finally:
+        # Restore the original print function
         builtins.print = original_print_func
         
     return len(price_changes)
 
+
 class ProductMonitorPage:
     def render(self):
+        global log_container, log_display
+        
         st.header("🔄 Product Monitor")
         
-        if not st.session_state.get("schedule_restored"):
-            if restore_saved_schedule():
-                st.toast("✅ Restored previous monitoring schedule")
-            st.session_state["schedule_restored"] = True
-        
         self.render_site_selection()
-        self.render_schedule_settings()
-        self.render_monitor_status()
-        self.render_monitor_tabs()
+        self.render_simplified_monitor()
 
     def render_site_selection(self):
         db = DataManager()
         sites = db.products.distinct("product_Affiliate_site")
         
-        # Initialize with empty list if not present
+        # Initialize with Amazon as default if available
         if "sites" not in st.session_state:
-            st.session_state["sites"] = []
+            st.session_state["sites"] = [site for site in sites if 'amazon.in' in site.lower()] if sites else []
         
         # Filter the default values to ensure they exist in options
         valid_defaults = [site for site in st.session_state["sites"] if site in sites]
@@ -211,280 +223,90 @@ class ProductMonitorPage:
             )
         st.session_state["sites"] = selected_sites
 
-    def render_schedule_settings(self):
-        with st.expander("🕒 Schedule Settings", expanded=True):
-            schedule_type = st.radio(
-                "Select Schedule Type",
-                ["Simple", "Advanced", "Custom Times"]
-            )
+    def render_simplified_monitor(self):
+        global log_container, log_display
+        
+        # Simple layout with just the Run Once button and logs
+        st.markdown("### Monitor Controls")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        # Only the Run Once button
+        with col1:
+            run_once_button = st.button("🔄 Run Once", type="primary", use_container_width=True)
+        
+        with col2:
+            clear_logs = st.button("🗑️ Clear Logs", use_container_width=True)
 
-            if schedule_type == "Simple":
-                frequency = st.selectbox(
-                    "Select frequency",
-                    ["Every 15 minutes", "Every 30 minutes", "Hourly", "Every 2 hours", "Every 6 hours"]
-                )
-            
-            elif schedule_type == "Advanced":
-                col1, col2 = st.columns(2)
-                with col1:
-                    hours = st.number_input("Hours", min_value=0, max_value=24)
-                with col2:
-                    minutes = st.number_input("Minutes", min_value=0, max_value=59)
-
-            else:  
-                times_container = st.container()
-                with times_container:
-                    if "daily_times" not in st.session_state:
-                        st.session_state.daily_times = [datetime.now().time()]
-                    
-                    for i, t in enumerate(st.session_state.daily_times):
-                        col1, col2 = st.columns([4, 1])
-                        with col1:
-                            st.session_state.daily_times[i] = st.time_input(
-                                f"Time #{i+1}",
-                                value=t
-                            )
-                        with col2:
-                            if st.button("🗑️", key=f"remove_time_{i}"):
-                                st.session_state.daily_times.pop(i)
-                                st.rerun()
-                    
-                    if st.button("➕ Add Another Time"):
-                        st.session_state.daily_times.append(datetime.now().time())
-                        st.rerun()
-
-            button_cols = st.columns([1, 1, 1])
-            with button_cols[0]:
-                start_button = st.button("▶️ Start Monitor", use_container_width=True)
-            with button_cols[1]:
-                stop_button = st.button("⏹️ Stop Monitor", use_container_width=True)
-            with button_cols[2]:
-                run_once_button = st.button("🔄 Run Once", use_container_width=True)
-
-        status_cols = st.columns([2, 1])
-        with status_cols[0]:
-            if "monitoring_active" in st.session_state and st.session_state["monitoring_active"]:
-                next_run_time = schedule.next_run()
-                next_run = next_run_time.strftime("%H:%M:%S") if next_run_time else "Not scheduled"
-                st.success(f"🔄 Monitor is running - Next check: {next_run}")
-            else:
-                st.warning("⏸️ Monitor is currently stopped")
-
+        # Display log area
         st.markdown("### 📜 Monitor Logs")
-        log_cols = st.columns([6, 1])
-        with log_cols[0]:
-            if "log_text" in st.session_state:
-                st.text_area(
-                    "",
-                    value=st.session_state.get("log_text", ""),
-                    height=400,
-                    key=f"log_viewer_{datetime.now().strftime('%H%M%S%f')}"
-                )
-            else:
-                st.info("No logs available yet")
+        
+        # Create a container for the log display
+        log_container = st.container()
+        
+        # Create an empty placeholder for the log content
+        with log_container:
+            log_display = st.empty()
+        
+        # Verify log_text exists before trying to display it
+        if "log_text" not in st.session_state:
+            st.session_state["log_text"] = ""
+            
+        # Display the initial logs
+        # update_log_display()
 
-        if start_button:
-            try:
-                st.session_state.script_run_ctx = get_script_run_ctx()
-                
-                if schedule_type == "Simple":
-                    freq_map = {
-                        "Every 5 minutes": 5,
-                        "Every 15 minutes": 15,
-                        "Every 30 minutes": 30,
-                        "Hourly": 60,
-                        "Every 2 hours": 120,
-                        "Every 6 hours": 360
-                    }
-                    if frequency is None:
-                        frequency = "Every 15 minutes" 
-                    
-                    minutes = freq_map[frequency]
-                    start_scheduler(0, minutes, [], run_monitor_once_for_sites)
-                    st.toast(f"✅ Monitor started with {frequency} schedule")
-                
-                elif schedule_type == "Advanced":
-                    if hours == 0 and minutes == 0:
-                        st.error("Please set a valid interval")
-                        return
-                    start_scheduler(hours, minutes, [],run_monitor_once_for_sites)
-                    st.toast(f"✅ Monitor started with {hours}h {minutes}m interval")
-                
-                else:  
-                    if not st.session_state.daily_times:
-                        st.error("Please add at least one time")
-                        return
-                    start_scheduler(0, 0, st.session_state.daily_times,run_monitor_once_for_sites)
-                    times_str = ", ".join([t.strftime("%H:%M") for t in st.session_state.daily_times])
-                    st.toast(f"✅ Monitor scheduled for: {times_str}")
-                
-                st.session_state["script_run_ctx"] = get_script_run_ctx()
-                
-            except Exception as e:
-                st.error(f"Failed to start scheduler: {str(e)}")
-
-        if stop_button:
-            stop_scheduler()
-            st.toast("✅ Monitor stopped")
-
+        # Handle Run Once button click
         if run_once_button:
-            st.toast("🔄 Starting manual check...")
-            run_monitor_once_for_sites(st.session_state.sites)
-
-    def render_monitor_status(self):
-        status_cols = st.columns([2, 1])
-        with status_cols[0]:
-            if "monitoring_active" in st.session_state and st.session_state["monitoring_active"]:
-                next_run_time = schedule.next_run()
-                next_run = next_run_time.strftime("%H:%M:%S") if next_run_time else "Not scheduled"
-                st.success(f"🔄 Monitor is running - Next check: {next_run}")
-            else:
-                st.warning("⏸️ Monitor is currently stopped")
-
-    def render_monitor_tabs(self):
-        tabs = st.tabs(["Monitor", "Notification Schedule"])
-        
-        with tabs[0]:
-            self.render_monitor_tab()
-        
-        with tabs[1]:
-            notification_schedule = NotificationSchedule()
-            notification_schedule.render()
-
-    def render_monitor_tab(self):
-        st.markdown("### 📜 Monitor Logs")
-        log_cols = st.columns([6, 1])
-        with log_cols[0]:
-            if "log_text" in st.session_state:
-                st.text_area(
-                    "",
-                    value=st.session_state.get("log_text", ""),
-                    height=400,
-                    key=f"log_viewer_{datetime.now().strftime('%H%M%S%f')}"
-                )
-            else:
-                st.info("No logs available yet")
-
-class NotificationSchedule:
-    def render(self):
-        st.subheader("📅 Notification Schedule")
-        
-        with st.expander("Configure Notifications", expanded=True):
-            schedule_type = st.selectbox(
-                "Schedule Type",
-                ["Daily", "Weekly", "Custom"]
-            )
-            
-            if schedule_type == "Daily":
-                notification_time = st.time_input("Select notification time", value=datetime.strptime("10:00", "%H:%M").time())
-            
-            elif schedule_type == "Weekly":
-                col1, col2 = st.columns(2)
-                with col1:
-                    week_day = st.selectbox(
-                        "Select day of week",
-                        ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-                    )
-                with col2:
-                    notification_time = st.time_input("Select time")
-            
-            else:  
-                custom_times = []
-                times_container = st.container()
-                with times_container:
-                    if "custom_notification_times" not in st.session_state:
-                        st.session_state.custom_notification_times = [datetime.now().time()]
-                    
-                    for i, t in enumerate(st.session_state.custom_notification_times):
-                        col1, col2 = st.columns([4, 1])
-                        with col1:
-                            st.session_state.custom_notification_times[i] = st.time_input(
-                                f"Time #{i+1}",
-                                value=t
-                            )
-                        with col2:
-                            if st.button("🗑️", key=f"remove_notification_time_{i}"):
-                                st.session_state.custom_notification_times.pop(i)
-                                st.rerun()
-                    
-                    if st.button("➕ Add Time"):
-                        st.session_state.custom_notification_times.append(datetime.now().time())
-                        st.rerun()
-
-            st.markdown("### 📧 Email Settings")
-            recipients = st.text_input("Recipients (comma-separated emails)")
-            subject_template = st.text_input("Email Subject Template", 
-                                          value="Price Alert: {product_name}")
-            body_template = st.text_area("Email Body Template", 
-                                       value="Product: {product_name}\nCurrent Price: ₹{current_price}\nMRP: ₹{mrp}\nDiscount: {discount}%\nBuy Now: {affiliate_link}")
-
-            if st.button("💾 Save Schedule"):
-                schedule_config = {
-                    "type": schedule_type,
-                    "active": True,
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "email": {
-                        "recipients": [r.strip() for r in recipients.split(",")],
-                        "subject_template": subject_template,
-                        "body_template": body_template
-                    }
-                }
-
-                if schedule_type == "Daily":
-                    schedule_config["time"] = notification_time.strftime("%H:%M")
-                elif schedule_type == "Weekly":
-                    schedule_config["day"] = week_day
-                    schedule_config["time"] = notification_time.strftime("%H:%M")
-                else:
-                    schedule_config["custom_times"] = [
-                        t.strftime("%H:%M") for t in st.session_state.custom_notification_times
-                    ]
-
-                db = DataManager()
-                try:
-                    db.save_notification_schedule(schedule_config)
-                    st.success("✅ Notification schedule saved successfully!")
-                    
-                    self.setup_notification_schedule(schedule_config)
-                except Exception as e:
-                    st.error(f"Failed to save schedule: {str(e)}")
-
-    def setup_notification_schedule(self, config):
-        """Set up the notification schedule based on configuration"""
-        schedule.clear()
-        
-        def send_notification():
             try:
-                db = DataManager()
-                notification_manager = NotificationManager()
+                # Get selected sites
+                sites = st.session_state.get("sites", [])
+                if not sites:
+                    st.error("Please select at least one site to monitor")
+                    return
                 
-                products = get_products_for_notification(db)
+                # Run the monitor
+                with st.spinner("Running monitor..."):
+                    total_changes = run_monitor_once_for_sites(sites)
                 
-                if products:
-                    for product in products:
-                        notification_manager.notify_price_change(
-                            product,
-                            product.get("Product_current_price", "N/A"),  # Using current price as old price
-                            product.get("Product_current_price", "N/A"),  # Using current price as new price
-                        )
+                # Show success message
+                st.success(f"✅ Monitor run complete! Detected {total_changes} price changes.")
             except Exception as e:
-                print(f"Error sending notification: {e}")
-
-        if config["type"] == "Daily":
-            schedule.every().day.at(config["time"]).do(send_notification)
+                st.error(f"❌ Error running monitor: {str(e)}")
+                st.error(traceback.format_exc())
         
-        elif config["type"] == "Weekly":
-            days = {
-                "Monday": schedule.every().monday,
-                "Tuesday": schedule.every().tuesday,
-                "Wednesday": schedule.every().wednesday,
-                "Thursday": schedule.every().thursday,
-                "Friday": schedule.every().friday,
-                "Saturday": schedule.every().saturday,
-                "Sunday": schedule.every().sunday
-            }
-            days[config["day"]].at(config["time"]).do(send_notification)
+        # Handle Clear Logs button
+        if clear_logs:
+            st.session_state["log_text"] = ""
+            # update_log_display()
+                
+        # Add option to export logs
+        # if st.session_state.get("log_text"):
+            # if st.button("📥 Download Logs"):
+            #     try:
+            #         log_file = f"logs/monitor_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            #         with open(log_file, "w") as f:
+            #             f.write(st.session_state["log_text"])
+            #         st.success(f"✅ Logs exported: {log_file}")
+            #     except Exception as e:
+            #         st.error(f"❌ Error exporting logs: {str(e)}")
         
-        else: 
-            for time in config["custom_times"]:
-                schedule.every().day.at(time).do(send_notification)
+        # Add option to view logs
+        if st.session_state.get("log_text"):
+            if st.button("👁️ View Logs"):
+                try:
+                    # Generate a unique filename in the logs directory
+                    log_file = f"logs/monitor_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                    
+                    # Write logs with UTF-8 encoding to support emojis and special characters
+                    with open(log_file, "w", encoding="utf-8") as f:
+                        f.write(st.session_state["log_text"])
+                        
+                    # Display the log contents in a larger format
+                    st.markdown("### Log Contents")
+                    with st.expander("Expand to view full log", expanded=True):
+                        st.code(st.session_state["log_text"], language="bash")
+                        
+                    st.info(f"✅ Logs saved to: {log_file}")
+                except Exception as e:
+                    st.error(f"❌ Error handling logs: {str(e)}")
+                    st.error(traceback.format_exc())
