@@ -257,26 +257,26 @@ class PublishPage:
             include_price_logs = False
             
             if price_change:
-                col1, col2 = st.columns(2)
-                with col1:
-                    price_change_hours = st.number_input(
-                        "Price change time window (hours)",
-                        min_value=1,
-                        max_value=72,
-                        value=int(saved_filters.get("price_change_hours", 24)),
-                        step=1,
-                        help="Only consider price changes that occurred within this many hours"
-                    )
-                with col2:
-                    price_change_strict = st.checkbox(
-                        "Strict mode",
-                        value=bool(saved_filters.get("price_change_strict", False)),
-                        help="If checked, stops if no price changes found. If unchecked, continues with all products."
-                    )
+                # col1, col2 = st.columns(2)
+                # with col1:
+                #     price_change_hours = st.number_input(
+                #         "Price change time window (hours)",
+                #         min_value=1,
+                #         max_value=72,
+                #         value=int(saved_filters.get("price_change_hours", 24)),
+                #         step=1,
+                #         help="Only consider price changes that occurred within this many hours"
+                #     )
+                # with col2:
+                #     price_change_strict = st.checkbox(
+                #         "Strict mode",
+                #         value=bool(saved_filters.get("price_change_strict", False)),
+                #         help="If checked, stops if no price changes found. If unchecked, continues with all products."
+                #     )
             
                 # New checkbox for including price change logs
                 include_price_logs = st.checkbox(
-                    "Include detailed price change logs",
+                    "Include detailed price change logs (ignore this is for DEV purpose)",
                     value=bool(saved_filters.get("include_price_logs", False)),
                     help="Include detailed logs of price changes from Amazon monitor"
                 )
@@ -942,51 +942,98 @@ class PublishPage:
                 
                 # Only update prices if we need to check for price changes
                 if filters.get("price_change", True):
-                    add_log("'Price change should be there' filter is enabled - checking for price changes...")
+                    add_log("'Price change should be there' filter is enabled - checking for real-time price changes...")
                     
-                    # Get the time window for price changes
-                    price_change_hours = filters.get("price_change_hours", 24)
-                    change_cutoff_time = datetime.now() - timedelta(hours=price_change_hours)
-                    add_log(f"Price change time window: {price_change_hours} hours (since {change_cutoff_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                    # Dictionary to store the current prices before update
+                    pre_update_prices = {}
                     
-                    # Check products for price changes
+                    # First, collect current prices for all candidate products
                     for product in candidate_products:
                         product_id = product.get("Product_unique_ID")
+                        current_price = product.get("Product_current_price")
+                        if product_id and current_price is not None:
+                            try:
+                                pre_update_prices[product_id] = float(current_price)
+                            except (ValueError, TypeError):
+                                add_log(f"⚠️ Warning: Could not convert price for product {product_id}: {current_price}")
+                    
+                    # Keep the UI elements for time window and strict mode, but we don't use them in the logic
+                    price_change_hours = filters.get("price_change_hours", 24)
+                    add_log(f"Price change time window: {price_change_hours} hours (informational only)")
+                    
+                    # Update product prices from Amazon
+                    add_log("Fetching latest prices from Amazon...")
+                    try:
+                        # Get all ASINs
+                        asins = [p.get("Product_unique_ID") for p in candidate_products if p.get("Product_unique_ID")]
+                        
+                        # Initialize the Amazon monitor
+                        amazon_monitor = AmazonIndiaMonitor()
+                        
+                        # Process in smaller batches to avoid overloading the API
+                        batch_size = 10
+                        for i in range(0, len(asins), batch_size):
+                            batch = asins[i:i+batch_size]
+                            add_log(f"Processing batch {i//batch_size + 1}/{(len(asins) + batch_size - 1)//batch_size}: {batch}")
+                            
+                            # Fetch latest data
+                            product_data = amazon_monitor.fetch_product_data(batch)
+                            
+                            # Update products with new data
+                            for asin, data in product_data.items():
+                                new_price = data.get("price")
+                                if new_price is not None:
+                                    # Update in database
+                                    db.update_product(asin, {
+                                        "Product_current_price": new_price,
+                                        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    })
+                                    add_log(f"Updated price for {asin}: {new_price}")
+                        
+                        # Small delay between batches
+                        time_module.sleep(2)
+                    except Exception as e:
+                        add_log(f"❌ Error updating prices: {str(e)}")
+                    
+                    # Refresh the candidate products with updated prices
+                    add_log("Refreshing products with updated prices...")
+                    candidate_products = list(db.get_products(base_query))
+                    
+                    # Now compare the updated prices with pre-update prices
+                    products_with_price_changes = []
+                    for product in candidate_products:
+                        product_id = product.get("Product_unique_ID")
+                        if not product_id or product_id not in pre_update_prices:
+                            continue
+                        
                         product_name = product.get("product_name", "Unknown")
                         current_price = product.get("Product_current_price")
                         
-                        # Check if this product has a price_changed_at timestamp within our window
-                        last_change_time = product.get("price_changed_at")
                         try:
-                            if last_change_time:
-                                # Convert to datetime if it's a string
-                                if isinstance(last_change_time, str):
-                                    last_change_time = datetime.strptime(last_change_time, "%Y-%m-%d %H:%M:%S")
-                                
-                                # Check if it's recent enough
-                                if last_change_time >= change_cutoff_time:
-                                    old_price = product.get("previous_price", "Unknown")
-                                    add_log(f"✅ Price change detected for {product_name}: Previous price: ₹{old_price}, Current price: ₹{current_price}")
-                                    products_with_price_changes.append(product)
-                        except Exception as e:
-                            add_log(f"⚠️ Error checking price change time for {product_name}: {str(e)}")
+                            old_price = pre_update_prices[product_id]
+                            new_price = float(current_price) if current_price else None
                             
-                    # Log how many products have price changes
-                    add_log(f"Found {len(products_with_price_changes)} products with price changes in the last {price_change_hours} hours")
+                            # Skip if either old_price or new_price is None or NaN
+                            if old_price is None or new_price is None or str(old_price).lower() == 'nan' or str(new_price).lower() == 'nan':
+                                add_log(f"⚠️ Skipping {product_name}: Invalid price comparison - Old price: {old_price}, New price: {new_price}")
+                                continue
+                                
+                            if new_price != old_price:
+                                add_log(f"✅ Price change detected for {product_name}: Previous price: ₹{old_price}, Current price: ₹{new_price}")
+                                # Add to price changes list regardless of other filters
+                                products_with_price_changes.append(product)
+                                # Log price change details for future reference
+                                product["_price_change_detected"] = True
+                                product["_old_price"] = old_price
+                                product["_new_price"] = new_price
+                        except (ValueError, TypeError) as e:
+                            add_log(f"⚠️ Error comparing prices for {product_name}: {str(e)}")
                     
-                    # If strict mode is enabled and no price changes, stop
-                    if filters.get("price_change_strict", False) and not products_with_price_changes:
-                        add_log("⚠️ No price changes found and strict mode is enabled. Stopping the process.")
-                        run_log["skipped"] = run_log["products_checked"]
-                        return
-                        
-                    # In strict mode, only use products with price changes
-                    if filters.get("price_change_strict", False) and products_with_price_changes:
-                        add_log(f"Strict mode: Filtering to only {len(products_with_price_changes)} products with recent price changes")
-                        all_products = products_with_price_changes
-                    else:
-                        # In non-strict mode, keep using all candidates
-                        all_products = candidate_products
+                    # Log how many products have price changes
+                    add_log(f"Found {len(products_with_price_changes)} products with real-time price changes")
+                    
+                    # Use only products with price changes
+                    all_products = products_with_price_changes if products_with_price_changes else []
                 else:
                     add_log("'Price change should be there' filter is disabled - using existing prices")
                     all_products = candidate_products
@@ -1109,31 +1156,53 @@ class PublishPage:
                                 price_dropped_filter = filters.get("price_dropped", True)
                                 not_recent_filter = filters.get("not_recent", True)
                                 
-                                # Check if product passes the enabled filters
-                                if (price_dropped_filter and price_dropped) or (not_recent_filter and not_recent):
-                                    # If either condition is true, add to eligible products
+                                # Create detailed logging for each check
+                                check_logs = []
+                                
+                                # Check if this product had a price change detected
+                                if "_price_change_detected" in product:
+                                    price_change_info = f"✅ Price change detected: ₹{product.get('_old_price')} → ₹{product.get('_new_price')}"
+                                    check_logs.append(price_change_info)
+                                
+                                # Check price drop since last publish
+                                if price_dropped_filter:
                                     if price_dropped:
                                         price_drop = last_price_float - current_price_float
                                         price_drop_pct = (price_drop / last_price_float) * 100
-                                        add_log(f"✅ Product {product_name} eligible - price dropped ₹{price_drop:.2f} ({price_drop_pct:.1f}%)")
-                                    
+                                        check_logs.append(f"✅ Price dropped: ₹{last_price_float} → ₹{current_price_float} (₹{price_drop:.2f}, {price_drop_pct:.1f}%)")
+                                    else:
+                                        check_logs.append(f"❌ Price not dropped: Current ₹{current_price_float} not lower than last published ₹{last_price_float}")
+                                
+                                # Check publication recency
+                                if not_recent_filter:
                                     if not_recent:
-                                        add_log(f"✅ Product {product_name} eligible - not published in {days_ago} days (threshold: {threshold_days})")
-                                    
+                                        check_logs.append(f"✅ Not published recently: {days_ago} days ago (threshold: {threshold_days})")
+                                    else:
+                                        check_logs.append(f"❌ Published too recently: {days_ago} days ago (threshold: {threshold_days})")
+                                
+                                # Log all checks for this product
+                                for log_entry in check_logs:
+                                    add_log(f"   {log_entry}")
+                                
+                                # Check if product passes the enabled filters
+                                if (price_dropped_filter and price_dropped) or (not_recent_filter and not_recent):
+                                    # Product eligible - add brief summary
                                     price_diff = float(buy_box_price) - float(current_price)
                                     bb_pct_diff = (price_diff / float(buy_box_price)) * 100 if float(buy_box_price) > 0 else 0
+                                    add_log(f"✅ Product {product_name} ELIGIBLE - passed filter checks")
                                     add_log(f"   📊 Price stats: Current < Buy Box by ₹{price_diff:.2f} ({bb_pct_diff:.1f}%)")
                                     eligible_products.append(product)
                                 else:
-                                    # Log why the product was skipped
+                                    # Product not eligible - add summary
+                                    add_log(f"❌ Product {product_name} NOT ELIGIBLE - failed filter checks")
+                                    
+                                    # Record specific reasons for skipping
                                     if price_dropped_filter and not price_dropped:
                                         reason = f"current price (₹{current_price_float}) not lower than last published price (₹{last_price_float})"
-                                        add_log(f"❌ Product {product_name} skipped: {reason}")
                                         run_log["skipped_reasons"][reason] = run_log["skipped_reasons"].get(reason, 0) + 1
                                     
                                     if not_recent_filter and not not_recent:
                                         reason = f"published too recently ({days_ago} days ago, threshold: {threshold_days} days)"
-                                        add_log(f"❌ Product {product_name} skipped: {reason}")
                                         run_log["skipped_reasons"][reason] = run_log["skipped_reasons"].get(reason, 0) + 1
                             except (ValueError, TypeError) as e:
                                 add_log(f"❌ Error comparing prices for {product_name}: {str(e)}")
