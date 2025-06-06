@@ -80,111 +80,7 @@ class NotificationPublisher:
             print(f"[Telegram] Failed to load configuration: {e}")
             return {"bot_token": None, "channel_name": None}
 
-    def telegram_push(self, message, image_path=None):
-        """
-        Send a message to Telegram channel(s).
-        
-        Args:
-            message (str): Message to send
-            image_path (str, optional): Path to image file
-            
-        Returns:
-            tuple: (success, error_message)
-        """
-        try:
-            # Get configuration
-            config = self.config_manager.get_config()
-            bot_token = config.get("telegram_bot_token")
-            
-            if not bot_token:
-                print("[Telegram] No bot token configured")
-                return False, "No bot token configured"
-            
-            # Get channels from both formats (array and legacy single channel)
-            channels = []
-            
-            # Get channels from the array format
-            if "telegram_channels" in config and isinstance(config["telegram_channels"], list):
-                for ch in config["telegram_channels"]:
-                    if isinstance(ch, str):
-                        ch = ch.strip()
-                        if ch:
-                            if not ch.startswith("@") and not ch.lstrip('-').isdigit():
-                                ch = f"@{ch}"
-                            channels.append(ch)
-            
-            # Add the legacy single channel if present and not already in the list
-            legacy_channel = config.get("telegram_chat_id", "").strip()
-            if legacy_channel and legacy_channel not in channels:
-                if not legacy_channel.startswith("@") and not legacy_channel.lstrip('-').isdigit():
-                    legacy_channel = f"@{legacy_channel}"
-                channels.append(legacy_channel)
-            
-            if not channels:
-                print("[Telegram] No channels configured")
-                return False, "No channels configured"
-            
-            print(f"[DEBUG] Sending to {len(channels)} channels: {channels}")
-            
-            successful_channels = []
-            errors = []
-            
-            # Process all channels
-            for channel in channels:
-                try:
-                    print(f"[Telegram] Sending message to channel: {channel}")
-                    
-                    # Prepare API URL
-                    api_url = f"https://api.telegram.org/bot{bot_token}/"
-                    
-                    # If we have an image, send photo with caption
-                    if image_path and os.path.exists(image_path):
-                        with open(image_path, 'rb') as photo:
-                            # Send photo with caption
-                            url = api_url + "sendPhoto"
-                            files = {'photo': photo}
-                            data = {
-                                'chat_id': channel,
-                                'caption': message,
-                                'parse_mode': 'HTML'
-                            }
-                            print(f"[DEBUG] Sending photo with caption to {url}")
-                            response = requests.post(url, files=files, data=data)
-                    else:
-                        # Send just text message
-                        url = api_url + "sendMessage"
-                        data = {
-                            'chat_id': channel,
-                            'text': message,
-                            'parse_mode': 'HTML',
-                            'disable_web_page_preview': False
-                        }
-                        print(f"[DEBUG] Sending text message to {url}")
-                        response = requests.post(url, json=data)
-                    
-                    # Check response
-                    print(f"[DEBUG] Response status code: {response.status_code}")
-                    print(f"[DEBUG] Response content: {response.text[:200]}")
-                    
-                    if response.status_code == 200:
-                        print(f"[Telegram] Successfully sent message to {channel}")
-                        successful_channels.append(channel)
-                    else:
-                        error_message = response.json().get("description", f"Error {response.status_code}")
-                        print(f"[Telegram] Failed to send to {channel}: {error_message}")
-                        print(f"[Telegram] Response: {response.text}")
-                        errors.append(f"{channel}: {error_message}")
-                        
-                except Exception as e:
-                    print(f"[Telegram] Exception while sending to {channel}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    errors.append(f"{channel}: {str(e)}")
-
-        except Exception as errors:
-            return False, str(errors)
-        return True, None
-    
+ 
     def test_telegram_config(self, bot_token: str, channel_names: str):
         """Test Telegram configuration with provided credentials"""
         try:
@@ -412,29 +308,7 @@ class NotificationPublisher:
                 print("✅ Email sent successfully.")
         except Exception as e:
             print(f"❌ Failed to send email: {e}")
-
-    def publish(self, product):
-        """
-         Publish a product by sending notifications via Telegram and WhatsApp.
-        :param product: Dictionary containing product details.
-        """
-        message = (
-            f"🛍️ *{product['product_name']}*\n"
-            f"💰 *Current Price:* ₹{product['Product_current_price']}\n"
-            f"💸 *MRP:* ₹{product['Product_Buy_box_price']}\n"
-            f"🔗 [Buy Now]({product['product_Affiliate_url']})"
-        )
-        image_path = product.get("Product_image_path")
-        telegram_success, telegram_error = self.telegram_push(message, image_path)
-        if not telegram_success:
-            print(f"❌ Telegram push failed: {telegram_error}")
-
-        group_name = self.config_manager.get("whatsapp_channel_names", "Default Group")
-        try:
-            self.whatsapp_push(product, group_name)
-        except Exception as e:
-            print(f"❌ WhatsApp push failed: {e}")
-            
+          
     def close(self):
         """Close browser and clean up resources"""
         try:
@@ -454,4 +328,206 @@ class NotificationPublisher:
         finally:
             self._cleanup_lock()
 
+    def telegram_push(self, message, image_path=None):
+        """
+        Send a message to Telegram channel(s).
+        
+        Args:
+            message (str): Message to send
+            image_path (str, optional): Path to image file
+            
+        Returns:
+            tuple: (success, error_message)
+        """
+        try:
+            # Get Telegram configuration
+            try:
+                config = self.config_manager.get_telegram_config()
+                bot_token = config.get("bot_token")
+            except (AttributeError, Exception) as e:
+                # Fallback to self.telegram_config
+                bot_token = self.telegram_config.get("bot_token")
+        
+            if not bot_token:
+                print("[Telegram] No bot token configured")
+                return False, "No bot token configured"
+        
+            # Get channels - read directly from config.json for reliability
+            channels = []
+        
+            try:
+                with open("config.json", "r") as f:
+                    json_config = json.load(f)
+            
+                # Process telegram_channels array
+                if "telegram_channels" in json_config and isinstance(json_config["telegram_channels"], list):
+                    for item in json_config["telegram_channels"]:
+                        if isinstance(item, str):
+                            # Split by commas if it contains commas
+                            if "," in item:
+                                for ch in item.split(","):
+                                    ch = ch.strip()
+                                    if ch:
+                                        if not ch.startswith("@") and not ch.lstrip('-').isdigit():
+                                            ch = f"@{ch}"
+                                        channels.append(ch)
+                            else:
+                                # Add as a single item if no commas
+                                ch = item.strip()
+                                if ch:
+                                    if not ch.startswith("@") and not ch.lstrip('-').isdigit():
+                                        ch = f"@{ch}"
+                                    channels.append(ch)
+                    
+                # Also check for comma-separated telegram_chat_id 
+                if "telegram_chat_id" in json_config:
+                    chat_id = json_config["telegram_chat_id"]
+                    if isinstance(chat_id, str) and "," in chat_id:
+                        for ch in chat_id.split(","):
+                            ch = ch.strip()
+                            if ch and ch not in channels:
+                                if not ch.startswith("@") and not ch.lstrip('-').isdigit():
+                                    ch = f"@{ch}"
+                                channels.append(ch)
+                    elif chat_id and chat_id not in channels:
+                        if not chat_id.startswith("@") and not chat_id.lstrip('-').isdigit():
+                            chat_id = f"@{chat_id}"
+                        channels.append(chat_id)
+            except Exception as e:
+                print(f"[Telegram] Error reading config.json: {e}")
+    
+            if not channels:
+                print("[Telegram] No channels configured")
+                return False, "No channels configured"
+                
+            print(f"[DEBUG] Sending to {len(channels)} channels: {channels}")
+        
+            successful_channels = []
+            errors = []
+        
+            # Process all channels
+            for channel in channels:
+                try:
+                    print(f"[Telegram] Sending message to channel: {channel}")
+                
+                    # Prepare API URL
+                    api_url = f"https://api.telegram.org/bot{bot_token}/"
+                
+                    # If we have an image, send photo with caption
+                    if image_path and os.path.exists(image_path):
+                        with open(image_path, 'rb') as photo:
+                            # Send photo with caption
+                            url = api_url + "sendPhoto"
+                            files = {'photo': photo}
+                            data = {
+                                'chat_id': channel,
+                                'caption': message,
+                                'parse_mode': 'HTML'
+                            }
+                            print(f"[DEBUG] Sending photo with caption to {url}")
+                            response = requests.post(url, files=files, data=data)
+                    else:
+                        # Send just text message
+                        url = api_url + "sendMessage"
+                        data = {
+                            'chat_id': channel,
+                            'text': message,
+                            'parse_mode': 'HTML',
+                            'disable_web_page_preview': False
+                        }
+                        print(f"[DEBUG] Sending text message to {url}")
+                        response = requests.post(url, json=data)
+                
+                    # Check response
+                    print(f"[DEBUG] Response status code: {response.status_code}")
+                    print(f"[DEBUG] Response content: {response.text[:200]}")
+                
+                    if response.status_code == 200:
+                        print(f"[Telegram] Successfully sent message to {channel}")
+                        successful_channels.append(channel)
+                    else:
+                        error_message = response.json().get("description", f"Error {response.status_code}")
+                        print(f"[Telegram] Failed to send to {channel}: {error_message}")
+                        print(f"[Telegram] Response: {response.text}")
+                        errors.append(f"{channel}: {error_message}")
+                    
+                except Exception as e:
+                    print(f"[Telegram] Exception while sending to {channel}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    errors.append(f"{channel}: {str(e)}")
 
+        except Exception as errors:
+            return False, str(errors)
+        return True, None
+
+
+    def publish(self, product):
+        """
+        Publish a product by sending notifications via Telegram and WhatsApp.
+        
+        Args:
+            product (dict): Dictionary containing product details.
+            
+        Returns:
+            tuple: (success, message) - True if published to at least one platform
+        """
+        success = False
+        channels_published = []
+        errors = []
+        
+        # Format the message using our formatter method for consistency
+        message = self.format_product_message(product)
+        image_path = product.get("Product_image_path")
+        
+        # Try Telegram first
+        telegram_success, telegram_error = self.telegram_push(message, image_path)
+        if telegram_success:
+            channels_published.append("Telegram")
+            success = True
+        else:
+            error_msg = f"❌ Telegram push failed: {telegram_error}"
+            print(error_msg)
+            errors.append(error_msg)
+
+        # Try WhatsApp
+        try:
+            # Get WhatsApp configuration
+            whatsapp_groups = []
+            
+            # Try to get group from self.config_manager (should be there)
+            try:
+                group_name = self.config_manager.get("whatsapp_channel_names", "")
+                if group_name:
+                    whatsapp_groups.append(group_name)
+            except Exception as e:
+                print(f"Warning: Could not get WhatsApp group from config: {e}")
+                
+            # If no groups configured, use default
+            if not whatsapp_groups:
+                whatsapp_groups.append("Default Group")
+            
+            # Send to all configured groups
+            whatsapp_success = False
+            for group_name in whatsapp_groups:
+                if self.whatsapp_push(product, group_name):
+                    channels_published.append(f"WhatsApp ({group_name})")
+                    whatsapp_success = True
+                    success = True
+            
+            if not whatsapp_success:
+                errors.append("❌ WhatsApp: Failed to send to any groups")
+                
+        except Exception as e:
+            error_msg = f"❌ WhatsApp push failed: {str(e)}"
+            print(error_msg)
+            errors.append(error_msg)
+
+        # Return overall status
+        result_message = ""
+        if channels_published:
+            result_message += f"Published to: {', '.join(channels_published)}. "
+        if errors:
+            result_message += f"Errors: {'; '.join(errors)}"
+            
+        return success, result_message

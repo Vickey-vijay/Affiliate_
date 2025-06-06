@@ -51,7 +51,7 @@ def main():
     client = st.session_state["mongo_client"]
     db = client["ramesh"]
     products_collection = db["products"]
-    published_collection = client["published_data"]["products"]
+    published_collection = client["ramesh"]["published_products"]
 
 
     publisher = Publisher(

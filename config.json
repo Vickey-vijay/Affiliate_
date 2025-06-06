@@ -15,11 +15,9 @@
         ]
     },
     "telegram_bot_token": "7713478940:AAGj9SwUSmdRpuT7kP5deuk3eG0qmP8xq24",
-    "telegram_chat_id": "@lootdealsgroup1",
+    "telegram_chat_id": "@random_public_channel, @testgroup123321s",
     "telegram_channels": [
-        "@lootdealsgroup1",
-        "@LootDealsIndia15",
-        "@random_public_channel"
+        "@random_public_channel, @testgroup123321s"
     ],
     "whatsapp": {
         "channel_names": "Testing channel",
