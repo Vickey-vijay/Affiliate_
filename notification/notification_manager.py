@@ -11,6 +11,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import telegram
+import requests  # For fallback method
+import asyncio  # For handling async operations
 
 class NotificationManager:
     def __init__(self):
@@ -168,5 +171,88 @@ class NotificationManager:
                 
         return True
     
+    def send_telegram_notification(self, message, image_path=None):
+        """Send notification to Telegram channel(s)"""
+        try:
+            # Get Telegram configuration
+            config = self.load_config()
+            bot_token = config.get("telegram_bot_token")
+            
+            # Process channels in multiple formats
+            channels = []
+            
+            # First check for array of channels (new format)
+            if "telegram_channels" in config and isinstance(config["telegram_channels"], list):
+                channels = config["telegram_channels"]
+            # Then check for legacy single channel
+            elif "telegram_chat_id" in config:
+                channels = [config["telegram_chat_id"]]
+            
+            # Clean up channel list
+            channels = [ch.strip() for ch in channels if ch.strip()]
+            
+            if not bot_token:
+                return False, "Telegram bot token not configured"
+            
+            if not channels:
+                return False, "No Telegram channels configured"
+                
+            # Initialize Telegram bot (handle both sync and async APIs)
+            success = False
+            errors = []
+            
+            # Handle each channel with REST API approach (more reliable than bot library)
+            for channel in channels:
+                try:
+                    # Ensure channel format is correct
+                    if channel and not channel.startswith("@") and not channel.lstrip('-').isdigit():
+                        channel = f"@{channel}"
+                    
+                    api_url = f"https://api.telegram.org/bot{bot_token}/"
+                    
+                    # Send message based on whether we have an image or not
+                    if image_path and os.path.exists(image_path):
+                        # Send with image
+                        with open(image_path, 'rb') as photo:
+                            response = requests.post(
+                                api_url + "sendPhoto",
+                                files={'photo': photo},
+                                data={
+                                    'chat_id': channel,
+                                    'caption': message,
+                                    'parse_mode': 'HTML'
+                                }
+                            )
+                    else:
+                        # Text-only message
+                        response = requests.post(
+                            api_url + "sendMessage",
+                            json={
+                                'chat_id': channel,
+                                'text': message,
+                                'parse_mode': 'HTML',
+                                'disable_web_page_preview': False
+                            }
+                        )
+                    
+                    if response.status_code == 200:
+                        success = True
+                    else:
+                        error_data = response.json()
+                        errors.append(f"{channel}: {error_data.get('description', 'Unknown error')}")
+                        
+                except Exception as e:
+                    errors.append(f"{channel}: {str(e)}")
+            
+            if success:
+                if errors:
+                    return True, f"Sent to some channels. Errors: {'; '.join(errors)}"
+                return True, "Message sent successfully to all channels"
+            else:
+                return False, '; '.join(errors)
+                
+        except Exception as e:
+            return False, f"Error sending Telegram notification: {str(e)}"
+
 
 

@@ -204,28 +204,44 @@ class ConfigPage:
 
         with tab2:
             st.subheader("Telegram Notification Settings")
-            
             bot_token = st.text_input("Telegram Bot Token", self.config.get("telegram_bot_token", ""), key="telegram_bot_token")
-            chat_id = st.text_input("Telegram Chat ID", self.config.get("telegram_chat_id", ""), key="telegram_chat_id")
+            
+            # Replace the single chat_id field with a text area for multiple channels
+            telegram_channels = st.text_area(
+                "Telegram Channels (one per line)",
+                value=self._get_telegram_channels_text(),
+                help="Enter channel names/IDs (with @ symbol) one per line",
+                key="telegram_channels"
+            )
 
             if st.button("Save Telegram Configuration", key="save_telegram_config"):
                 self.config["telegram_bot_token"] = bot_token
-                self.config["telegram_chat_id"] = chat_id
+                
+                # Parse channels and store as an array
+                channels = [c.strip() for c in telegram_channels.split('\n') if c.strip()]
+                self.config["telegram_channels"] = channels
+                
+                # Keep legacy field for backward compatibility
+                if channels:
+                    self.config["telegram_chat_id"] = channels[0]
+                else:
+                    self.config["telegram_chat_id"] = ""
+                    
                 self.save_config()
                 st.success("✅ Telegram configuration saved successfully!")
 
             if st.button("Test Telegram Configuration", key="test_telegram_config"):
-                if not bot_token or not chat_id:
-                    st.error("Please provide both the Telegram Bot Token and Chat ID.")
+                if not bot_token or not telegram_channels.strip():
+                    st.error("Please provide both the Telegram Bot Token and at least one channel.")
                 else:
                     try:
                         config_manager = ConfigManager()
                         notification_publisher = NotificationPublisher(config_manager)
                         test_message = "This is a test message from Affiliate Product Monitor."
-                        success, error_message = notification_publisher.telegram_push(test_message)
+                        success, error_message = notification_publisher.test_telegram_config(bot_token, telegram_channels)
                         
                         if success:
-                            st.success(f"✅ Test message sent successfully to chat ID '{chat_id}'!")
+                            st.success("✅ Test message sent successfully to all channels!")
                         else:
                             st.error(f"❌ Failed to send test message: {error_message}")
                     except Exception as e:
@@ -348,5 +364,17 @@ class ConfigPage:
                 st.json(
                     {k: v for k, v in self.config.items() if "notification" in k.lower()}
                 )
+
+    def _get_telegram_channels_text(self):
+        """Convert stored telegram channels to text format for the UI"""
+        # Try to get channels from array format first
+        if "telegram_channels" in self.config and isinstance(self.config["telegram_channels"], list):
+            return "\n".join(self.config["telegram_channels"])
+        
+        # Fall back to single channel if array not found
+        elif "telegram_chat_id" in self.config and self.config["telegram_chat_id"]:
+            return self.config["telegram_chat_id"]
+        
+        return ""
 
 

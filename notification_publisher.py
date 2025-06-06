@@ -183,33 +183,40 @@ class NotificationPublisher:
             return False, str(e)
 
     def test_telegram_config(self, bot_token: str, channel_names: str):
-        """
-        Tests the Telegram bot token and channel names by sending a test message.
-        :param bot_token: The Telegram bot token.
-        :param channel_names: Comma-separated Telegram channel names.
-        :return: Tuple (success: bool, error_message: str or None)
-        """
-        errors = []
-        for channel_name in channel_names.split(","):
-            channel_name = channel_name.strip()
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            payload = {"chat_id": channel_name, "text": "Test message from Affiliate Product Monitor"}
+        """Test Telegram configuration with provided credentials"""
+        try:
+            # Split channel names by newlines or commas
+            channels = []
+            for line in channel_names.split('\n'):
+                channels.extend([ch.strip() for ch in line.split(',') if ch.strip()])
+                
+            if not channels:
+                return False, "No channels specified"
+                
+            import telegram
+            bot = telegram.Bot(token=bot_token)
+            test_message = "This is a test message from Affiliate Product Monitor."
+            
+            errors = []
+            success = False
+            
+            for channel_name in channels:
+                try:
+                    # Ensure channel format is correct
+                    if channel_name and not channel_name.startswith("@") and not channel_name.lstrip('-').isdigit():
+                        channel_name = f"@{channel_name}"
+                        
+                    bot.send_message(chat_id=channel_name, text=test_message)
+                    success = True
+                except Exception as e:
+                    print(f"[Telegram] Exception occurred during test for {channel_name}: {e}")
+                    errors.append(f"{channel_name}: {str(e)}")
 
-            try:
-                response = requests.post(url, data=payload)
-                if response.status_code == 200:
-                    print(f"[Telegram] Test message sent successfully to {channel_name}.")
-                else:
-                    error_message = response.json().get("description", "Unknown error")
-                    print(f"[Telegram] Test failed for {channel_name}: {error_message}")
-                    errors.append(f"{channel_name}: {error_message}")
-            except Exception as e:
-                print(f"[Telegram] Exception occurred during test for {channel_name}: {e}")
-                errors.append(f"{channel_name}: {str(e)}")
-
-        if errors:
-            return False, "; ".join(errors)
-        return True, None
+            if errors:
+                return success, "; ".join(errors)
+            return True, None
+        except Exception as e:
+            return False, f"Error testing Telegram configuration: {str(e)}"
 
     def whatsapp_push(self, product, recipient_name, message=None, is_channel=False):
         """
