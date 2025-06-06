@@ -209,7 +209,7 @@ class ProductMonitorPage:
         
         # Initialize with Amazon as default if available
         if "sites" not in st.session_state:
-            st.session_state["sites"] = [site for site in sites if 'amazon.in' in site.lower()] if sites else []
+            st.session_state["sites"] = [site for site in sites if isinstance(site, str) and 'amazon.in' in site.lower()] if sites else []
         
         # Filter the default values to ensure they exist in options
         valid_defaults = [site for site in st.session_state["sites"] if site in sites]
@@ -310,3 +310,27 @@ class ProductMonitorPage:
                 except Exception as e:
                     st.error(f"❌ Error handling logs: {str(e)}")
                     st.error(traceback.format_exc())
+        
+        # Add cleanup button
+        if st.button("🧹 Cleanup Affiliate Sites"):
+            with st.spinner("Cleaning up site values..."):
+                try:
+                    cleanup_affiliate_sites()
+                    st.success("✅ Cleanup complete!")
+                except Exception as e:
+                    st.error(f"❌ Error during cleanup: {str(e)}")
+                    st.error(traceback.format_exc())
+
+def cleanup_affiliate_sites():
+    db = DataManager()
+    products = db.products.find({"product_Affiliate_site": {"$exists": True}})
+    
+    for product in products:
+        site = product.get("product_Affiliate_site")
+        if site is not None and not isinstance(site, str):
+            # Convert non-string values to strings
+            db.update_product(
+                product.get("Product_unique_ID"),
+                {"product_Affiliate_site": str(site)}
+            )
+            print(f"Converted site value {site} to string for product {product.get('Product_unique_ID')}")
