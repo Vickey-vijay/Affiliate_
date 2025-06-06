@@ -9,6 +9,9 @@ from utils.whatsapp_sender import WhatsappSender
 import shutil
 import tempfile
 from email.mime.application import MIMEApplication
+import telegram
+import requests  # For fallback method
+import asyncio  # For handling async operations
 
 
 class NotificationPublisher:
@@ -192,22 +195,37 @@ class NotificationPublisher:
                 
             if not channels:
                 return False, "No channels specified"
-                
-            import telegram
-            bot = telegram.Bot(token=bot_token)
-            test_message = "This is a test message from Affiliate Product Monitor."
             
             errors = []
             success = False
             
+            # Use direct API approach instead of telegram Bot library for consistency
             for channel_name in channels:
                 try:
                     # Ensure channel format is correct
                     if channel_name and not channel_name.startswith("@") and not channel_name.lstrip('-').isdigit():
                         channel_name = f"@{channel_name}"
-                        
-                    bot.send_message(chat_id=channel_name, text=test_message)
-                    success = True
+                    
+                    # Use requests to send message directly via Telegram API
+                    test_message = "This is a test message from Affiliate Product Monitor."
+                    api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    
+                    response = requests.post(
+                        api_url,
+                        json={
+                            'chat_id': channel_name,
+                            'text': test_message,
+                            'parse_mode': 'HTML'
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        success = True
+                    else:
+                        error_data = response.json()
+                        errors.append(f"{channel_name}: {error_data.get('description', 'Unknown error')}")
+                        print(f"[Telegram] Test failed for {channel_name}: {error_data.get('description')}")
+            
                 except Exception as e:
                     print(f"[Telegram] Exception occurred during test for {channel_name}: {e}")
                     errors.append(f"{channel_name}: {str(e)}")
