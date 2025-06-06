@@ -680,128 +680,6 @@ class PublishPage:
             if hasattr(self, 'notification_publisher'):
                 self.notification_publisher.close()
 
-    def publish_product(self, product):
-        """Common function to publish a product"""
-        try:
-            # Initialize publisher if needed
-            if not hasattr(self, 'notification_publisher'):
-                self.notification_publisher = NotificationPublisher(self.config_manager)
-            
-            # Generate formatted message using the centralized format function
-            message = self.notification_publisher.format_product_message(product)
-            
-            # List to track successful channels
-            channels = []
-            errors = []
-            
-            # Get the selected channels from session state
-            selected_channels = st.session_state.get("immediate_channels", ["Telegram"])  # Default to Telegram if not set
-            
-            # Send to Telegram ONLY IF selected
-            if "Telegram" in selected_channels:
-                telegram_success, telegram_error = self.notification_publisher.telegram_push(message, product.get("Product_image_path"))
-                if telegram_success:
-                    channels.append("telegram")
-                else:
-                    errors.append(f"Telegram: {telegram_error}")
-                    print(f"❌ Telegram push failed: {telegram_error}")
-            
-            # Send to WhatsApp channels ONLY IF selected
-            if "WhatsApp" in selected_channels:
-                whatsapp_config = self.config_manager.get_whatsapp_config()
-                whatsapp_channel_names = whatsapp_config.get("channel_names", "") if whatsapp_config else ""
-                
-                if whatsapp_channel_names:
-                    # Initialize WhatsApp sender for fresh session
-                    try:
-                        from utils.whatsapp_sender import WhatsappSender
-                        whatsapp = WhatsappSender()
-                    except Exception as e:
-                        errors.append(f"WhatsApp initialization failed: {str(e)}")
-                        print(f"❌ Failed to initialize WhatsApp: {str(e)}")
-                    
-                    # Send to each configured channel
-                    for channel in whatsapp_channel_names.split(","):
-                        channel = channel.strip()
-                        if channel:
-                            try:
-                                # Process each channel with a fresh session
-                                if self.notification_publisher.whatsapp_push(product, channel, message, is_channel=True):
-                                    channels.append(f"whatsapp_channel_{channel}")
-                                else:
-                                    errors.append(f"WhatsApp: Failed to send to channel {channel}")
-                                    print(f"❌ Failed to send to WhatsApp channel: {channel}")
-                            except Exception as e:
-                                errors.append(f"WhatsApp channel error: {str(e)}")
-                                print(f"❌ WhatsApp channel error: {str(e)}")
-                        
-                        # Clean up WhatsApp driver after each channel
-                        self._cleanup_whatsapp_drivers()
-            
-                # Send to WhatsApp groups
-                whatsapp_group_names = whatsapp_config.get("group_names", "") if whatsapp_config else ""
-                if whatsapp_group_names:
-                    # Initialize a fresh WhatsApp sender for groups
-                    try:
-                        from utils.whatsapp_sender import WhatsappSender
-                        whatsapp = WhatsappSender()
-                    except Exception as e:
-                        errors.append(f"WhatsApp initialization failed: {str(e)}")
-                        print(f"❌ Failed to initialize WhatsApp: {str(e)}")
-                    
-                    # Send to each configured group
-                    for group in whatsapp_group_names.split(","):
-                        group = group.strip()
-                        if group:
-                            try:
-                                # Process each group with a fresh session
-                                if self.notification_publisher.whatsapp_push(product, group, message, is_channel=False):
-                                    channels.append(f"whatsapp_group_{group}")
-                                else:
-                                    errors.append(f"WhatsApp: Failed to send to group {group}")
-                                    print(f"❌ Failed to send to WhatsApp group: {group}")
-                            except Exception as e:
-                                errors.append(f"WhatsApp group error: {str(e)}")
-                                print(f"❌ WhatsApp group error: {str(e)}")
-                            
-                            # Clean up WhatsApp driver after each group
-                            self._cleanup_whatsapp_drivers()
-        
-            # Update product status in database
-            product_id = product.get("Product_unique_ID")
-            if product_id:
-                self.db.update_product(product_id, {
-                    "published_status": True,
-                    "Publish": False,
-                    "Publish_time": None,
-                    "Last_published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "last_published_price": product.get("Product_current_price"),  # Store current price for future comparisons
-                    "published_channels": channels
-                })
-                
-                # Record publication in published_products collection
-                self.db.db.published_products.insert_one({
-                    "product_id": product_id,
-                    "product_name": product.get("product_name"),
-                    "product_price": product.get("Product_current_price"),
-                    "published_date": datetime.now(),
-                    "channels": channels,
-                    "message": message,
-                    "errors": errors if errors else None
-                })
-            
-            # Make sure all drivers are cleaned up
-            self._cleanup_whatsapp_drivers()
-            
-            # Return success if at least one channel worked
-            if channels:
-                return True, f"Published to {', '.join(channels)}"
-            else:
-                return False, f"Failed to publish to any channels: {'; '.join(errors)}"
-            
-        except Exception as e:
-            print(f"❌ Error in publish_product: {str(e)}")
-            return False, f"Error: {str(e)}"
 
     def _cleanup_whatsapp_drivers(self):
         """Clean up any WhatsApp web driver instances that might be in session state"""
@@ -1230,7 +1108,6 @@ class PublishPage:
                     next_run_datetime = datetime.combine(tomorrow, time(hours, minutes))
                 
                 next_run = next_run_datetime if next_run_datetime else now + timedelta(days=1)
-                add_log(f"Next run scheduled for: {next_run.strftime('%Y-%m-%d %I:%M:%S %p')}")
         
             # Update config with next run time
             auto_config = self.db.get_auto_publish_config()
@@ -1308,6 +1185,107 @@ class PublishPage:
             # Always clear the running flag
             st.session_state.auto_publish_running = False
 
+    def publish_product(self, product):
+        """
+        Common function to publish a product to selected channels
+        :param product: Dictionary containing product details
+        :return: (success, message) tuple
+        """
+        try:
+            # Initialize publisher if needed
+            if not hasattr(self, 'notification_publisher'):
+                self.notification_publisher = NotificationPublisher(self.config_manager)
+            
+            # Generate formatted message using the centralized format function
+            message = self.notification_publisher.format_product_message(product)
+            
+            # Track successful channels and errors
+            successful_channels = []
+            errors = []
+            
+            # Get the selected channels from session state
+            selected_channels = st.session_state.get("immediate_channels", ["Telegram"])
+            
+            # Send to Telegram ONLY IF selected
+            if "Telegram" in selected_channels:
+                telegram_success, telegram_error = self.notification_publisher.telegram_push(
+                    message, 
+                    product.get("Product_image_path")
+                )
+                if telegram_success:
+                    successful_channels.append("Telegram")
+                else:
+                    errors.append(f"Telegram: {telegram_error}")
+                    print(f"❌ Telegram push failed: {telegram_error}")
+            
+            # Send to WhatsApp ONLY IF selected
+            if "WhatsApp" in selected_channels:
+                whatsapp_config = self.config_manager.get_whatsapp_config()
+                if not whatsapp_config:
+                    errors.append("WhatsApp: Configuration not found")
+                else:
+                    # Get channel and group configurations
+                    whatsapp_channels = whatsapp_config.get("channel_names", "").split(",") if whatsapp_config.get("channel_names") else []
+                    whatsapp_groups = whatsapp_config.get("group_names", "").split(",") if whatsapp_config.get("group_names") else []
+                    
+                    # Process each channel and group
+                    for channel_type, items in [("channel", whatsapp_channels), ("group", whatsapp_groups)]:
+                        for item in items:
+                            item = item.strip()
+                            if not item:
+                                continue
+                                
+                            try:
+                                # Initialize fresh WhatsApp sender for each send to avoid session issues
+                                is_channel = (channel_type == "channel")
+                                if self.notification_publisher.whatsapp_push(product, item, message, is_channel=is_channel):
+                                    successful_channels.append(f"WhatsApp {channel_type}: {item}")
+                                else:
+                                    errors.append(f"WhatsApp: Failed to send to {channel_type} {item}")
+                            except Exception as e:
+                                errors.append(f"WhatsApp {channel_type} error: {str(e)}")
+                                print(f"❌ WhatsApp {channel_type} error: {str(e)}")
+                        
+                        # Clean up WhatsApp driver after each operation
+                        self._cleanup_whatsapp_drivers()
+            
+            # Update product status in database
+            product_id = product.get("Product_unique_ID")
+            if product_id:
+                # Update the product record
+                self.db.update_product(product_id, {
+                    "published_status": True,
+                    "Publish": False,
+                    "Publish_time": None,
+                    "Last_published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_published_price": product.get("Product_current_price"),
+                    "published_channels": successful_channels
+                })
+                
+                # Record in the publications collection
+                self.db.db.published_products.insert_one({
+                    "product_id": product_id,
+                    "product_name": product.get("product_name"),
+                    "product_price": product.get("Product_current_price"),
+                    "published_date": datetime.now(),
+                    "channels": successful_channels,
+                    "message": message,
+                    "errors": errors if errors else None
+                })
+            
+        
+            self._cleanup_whatsapp_drivers()
+            
+            # Return success if at least one channel worked
+            if successful_channels:
+                return True, f"Published to {', '.join(successful_channels)}"
+            else:
+                return False, f"Failed to publish to any channels: {'; '.join(errors)}"
+            
+        except Exception as e:
+            print(f"❌ Error in publish_product: {str(e)}")
+            traceback.print_exc()
+            return False, f"Error: {str(e)}"
 
 
 

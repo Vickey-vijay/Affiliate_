@@ -188,10 +188,17 @@ class NotificationPublisher:
     def test_telegram_config(self, bot_token: str, channel_names: str):
         """Test Telegram configuration with provided credentials"""
         try:
-            # Split channel names by newlines or commas
+            # Split channel names by newlines and/or commas (to handle both formats)
             channels = []
             for line in channel_names.split('\n'):
-                channels.extend([ch.strip() for ch in line.split(',') if ch.strip()])
+                # Then split by commas if present
+                for part in line.split(','):
+                    part = part.strip()
+                    if part:
+                        # Make sure channel names are properly formatted
+                        if not part.startswith("@") and not part.lstrip('-').isdigit():
+                            part = f"@{part}"
+                        channels.append(part)
                 
             if not channels:
                 return False, "No channels specified"
@@ -199,13 +206,9 @@ class NotificationPublisher:
             errors = []
             success = False
             
-            # Use direct API approach instead of telegram Bot library for consistency
+            # Use direct API approach for consistent behavior
             for channel_name in channels:
                 try:
-                    # Ensure channel format is correct
-                    if channel_name and not channel_name.startswith("@") and not channel_name.lstrip('-').isdigit():
-                        channel_name = f"@{channel_name}"
-                    
                     # Use requests to send message directly via Telegram API
                     test_message = "This is a test message from Affiliate Product Monitor."
                     api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"

@@ -367,14 +367,45 @@ class ConfigPage:
 
     def _get_telegram_channels_text(self):
         """Convert stored telegram channels to text format for the UI"""
+        channels = []
+        
         # Try to get channels from array format first
         if "telegram_channels" in self.config and isinstance(self.config["telegram_channels"], list):
-            return "\n".join(self.config["telegram_channels"])
+            # Filter out any non-string items (like nested objects)
+            channels = [ch for ch in self.config["telegram_channels"] if isinstance(ch, str)]
         
-        # Fall back to single channel if array not found
-        elif "telegram_chat_id" in self.config and self.config["telegram_chat_id"]:
-            return self.config["telegram_chat_id"]
+        # Fall back to single channel if array not found or empty
+        if not channels and "telegram_chat_id" in self.config and self.config["telegram_chat_id"]:
+            channels = [self.config["telegram_chat_id"]]
         
-        return ""
+        return "\n".join(channels)
+
+    def save_telegram_config(self):
+        """Save telegram configuration correctly"""
+        bot_token = st.session_state.get("telegram_bot_token", "")
+        telegram_channels_text = st.session_state.get("telegram_channels", "")
+        
+        # Parse channels and store as an array
+        channels = []
+        for line in telegram_channels_text.split('\n'):
+            for channel in line.split(','):
+                channel = channel.strip()
+                if channel:
+                    # Ensure channels have @ prefix
+                    if not channel.startswith("@") and not channel.lstrip('-').isdigit():
+                        channel = f"@{channel}"
+                    channels.append(channel)
+        
+        self.config["telegram_bot_token"] = bot_token
+        self.config["telegram_channels"] = channels
+        
+        # Keep legacy field for backward compatibility
+        if channels:
+            self.config["telegram_chat_id"] = channels[0]
+        else:
+            self.config["telegram_chat_id"] = ""
+            
+        self.save_config()
+        return True
 
 

@@ -183,14 +183,33 @@ class NotificationManager:
             
             # First check for array of channels (new format)
             if "telegram_channels" in config and isinstance(config["telegram_channels"], list):
-                channels = config["telegram_channels"]
+                # Filter out any nested dictionary objects that might have gotten in
+                channels = [ch for ch in config["telegram_channels"] if isinstance(ch, str)]
+            
             # Then check for legacy single channel
-            elif "telegram_chat_id" in config:
+            if not channels and "telegram_chat_id" in config and config["telegram_chat_id"]:
                 channels = [config["telegram_chat_id"]]
             
-            # Clean up channel list
-            channels = [ch.strip() for ch in channels if ch.strip()]
+            # Clean up channel list and ensure @ prefix
+            channels = []
+            for ch in config.get("telegram_channels", []):
+                # Skip non-string entries
+                if not isinstance(ch, str):
+                    continue
+                    
+                ch = ch.strip()
+                if ch:
+                    if not ch.startswith("@") and not ch.lstrip('-').isdigit():
+                        ch = f"@{ch}"
+                    channels.append(ch)
             
+            # Add legacy channel if available and not already in the list
+            legacy_channel = config.get("telegram_chat_id", "").strip()
+            if legacy_channel and legacy_channel not in channels:
+                if not legacy_channel.startswith("@") and not legacy_channel.lstrip('-').isdigit():
+                    legacy_channel = f"@{legacy_channel}"
+                channels.append(legacy_channel)
+                
             if not bot_token:
                 return False, "Telegram bot token not configured"
             
