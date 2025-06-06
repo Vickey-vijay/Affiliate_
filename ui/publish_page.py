@@ -611,10 +611,11 @@ class PublishPage:
             if hasattr(self, 'notification_publisher'):
                 self.notification_publisher.close()
 
-    def publish_product(self, product):
+    def publish_product(self, product, override_channels=None):
         """
         Common function to publish a product to selected channels
         :param product: Dictionary containing product details
+        :param override_channels: Optional list of channels to use instead of session state
         :return: (success, message) tuple
         """
         try:
@@ -629,8 +630,8 @@ class PublishPage:
             successful_channels = []
             errors = []
             
-            # Get the selected channels from session state
-            selected_channels = st.session_state.get("immediate_channels", ["Telegram"])
+            # Get the selected channels from session state or override
+            selected_channels = override_channels if override_channels else st.session_state.get("immediate_channels", ["Telegram"])
             
             # Send to Telegram ONLY IF selected
             if "Telegram" in selected_channels:
@@ -890,8 +891,19 @@ class PublishPage:
                 print(log_entry)
                 run_log["detailed_logs"].append(log_entry)
                 # Also write to log file for persistence
-                with open(log_filename, 'a') as f:
-                    f.write(log_entry + "\n")
+                try:
+                    with open(log_filename, 'a', encoding='utf-8') as f:
+                        f.write(log_entry + "\n")
+                except Exception as e:
+                    print(f"Error writing to log: {e}")
+                    # Try writing without emojis if encoding fails
+                    try:
+                        # Replace emojis with text representations
+                        safe_entry = log_entry.encode('ascii', 'ignore').decode('ascii')
+                        with open(log_filename, 'a') as f:
+                            f.write(safe_entry + "\n")
+                    except Exception as e2:
+                        print(f"Error writing safe log entry: {e2}")
 
             add_log(f"Starting automatic publishing job...")
             
@@ -1012,8 +1024,24 @@ class PublishPage:
                             if pub_date and price:
                                 product_history.append((price, pub_date))
                     
-                    # Sort by date, newest first
-                    product_history.sort(key=lambda x: x[1], reverse=True)
+                    # Sort by date, newest first - ensure consistent types
+                    try:
+                        # Convert any string dates to datetime objects
+                        for i, (price, date) in enumerate(product_history):
+                            if isinstance(date, str):
+                                try:
+                                    product_history[i] = (price, datetime.strptime(date, "%Y-%m-%d %H:%M:%S"))
+                                except ValueError:
+                                    try:
+                                        # Try alternative format
+                                        product_history[i] = (price, datetime.strptime(date, "%Y-%m-%d"))
+                                    except ValueError:
+                                        # If conversion fails, skip this record
+                                        continue
+                        # Now sort when all dates are datetime objects
+                        product_history.sort(key=lambda x: x[1], reverse=True)
+                    except Exception as e:
+                        add_log(f"⚠️ Warning: Could not sort publication history for {product_id}: {str(e)}")
                     
                     # Store in lookup dict
                     if product_history:
@@ -1145,9 +1173,10 @@ class PublishPage:
                         product_id = product.get("Product_unique_ID", "Unknown")
                         add_log(f"Attempting to publish: {product_name} (ID: {product_id})")
                         
-                        # Call publish_product with selected channels
-                        st.session_state.immediate_channels = selected_channels  # Set the channels in session state
-                        success, message = self.publish_product(product)
+                        # Instead of modifying session_state, pass channels directly
+                        # Call a modified version of publish_product that takes channels as a parameter
+                        # Around line 1170 in auto_publish_job method
+                        success, message = self.publish_product(product, override_channels=selected_channels)
                         product_info = {
                             "name": product.get("product_name"),
                             "id": product.get("Product_unique_ID"),
@@ -1239,3 +1268,101 @@ class PublishPage:
         finally:
             # Always clear the running flag
             st.session_state.auto_publish_running = False
+
+    def publish_product_with_channels(self, product, channels):
+        """
+        Publish a product to the specified channels
+        :param product: Dictionary containing product details
+        :param channels: List of channels to publish to
+        :return: (success, message) tuple
+        """
+        try:
+            # Initialize publisher if needed
+            if not hasattr(self, 'notification_publisher'):
+                self.notification_publisher = NotificationPublisher(self.config_manager)
+            
+            # Generate formatted message using the centralized format function
+            message = self.notification_publisher.format_product_message(product)
+            
+            # Track successful channels and errors
+            successful_channels = []
+            errors = []
+            
+            # Send to Telegram ONLY IF selected
+            if "Telegram" in channels:
+                telegram_success, telegram_error = self.notification_publisher.telegram_push(
+                    message, 
+                    product.get("Product_image_path")
+                )
+                if telegram_success:
+                    successful_channels.append("Telegram")
+                else:
+                    errors.append(f"Telegram: {telegram_error}")
+                    print(f"❌ Telegram push failed: {telegram_error}")
+            
+            # Send to WhatsApp ONLY IF selected
+            if "WhatsApp" in channels:
+                whatsapp_config = self.config_manager.get_whatsapp_config()
+                if not whatsapp_config:
+                    errors.append("WhatsApp: Configuration not found")
+                else:
+                    # Get channel and group configurations
+                    whatsapp_channels = whatsapp_config.get("channel_names", "").split(",") if whatsapp_config.get("channel_names") else []
+                    whatsapp_groups = whatsapp_config.get("group_names", "").split(",") if whatsapp_config.get("group_names") else []
+                    
+                    # Process each channel and group
+                    for channel_type, items in [("channel", whatsapp_channels), ("group", whatsapp_groups)]:
+                        for item in items:
+                            item = item.strip()
+                            if not item:
+                                continue
+
+                            try:
+                                # Initialize fresh WhatsApp sender for each send to avoid session issues
+                                is_channel = (channel_type == "channel")
+                                if self.notification_publisher.whatsapp_push(product, item, message, is_channel=is_channel):
+                                    successful_channels.append(f"WhatsApp {channel_type}: {item}")
+                                else:
+                                    errors.append(f"WhatsApp: Failed to send to {channel_type} {item}")
+                            except Exception as e:
+                                errors.append(f"WhatsApp {channel_type} error: {str(e)}")
+                                print(f"❌ WhatsApp {channel_type} error: {str(e)}")
+            
+            # Clean up WhatsApp driver after each operation
+            self._cleanup_whatsapp_drivers()
+
+            # Update product status in database
+            product_id = product.get("Product_unique_ID")
+            if product_id:
+                # Update the product record
+                self.db.update_product(product_id, {
+                    "published_status": True,
+                    "Publish": False,
+                    "Publish_time": None,
+                    "Last_published_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_published_price": product.get("Product_current_price"),
+                    "published_channels": successful_channels
+                })
+                
+                # Record in the publications collection
+                self.db.db.published_products.insert_one({
+                    "product_id": product_id,
+                    "product_name": product.get("product_name"),
+                    "product_price": product.get("Product_current_price"),
+                    "published_date": datetime.now(),
+                    "channels": successful_channels,
+                    "message": message,
+                    "errors": errors if errors else None
+                })
+                
+                if successful_channels:
+                    return True, f"Published to {', '.join(successful_channels)}"
+                else:
+                    return False, f"Failed to publish to any channels: {'; '.join(errors)}"
+            else:
+                return False, "Product ID is missing"
+            
+        except Exception as e:
+            print(f"❌ Error in publish_product_with_channels: {str(e)}")
+            traceback.print_exc()
+            return False, f"Error: {str(e)}"
