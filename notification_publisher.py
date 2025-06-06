@@ -9,7 +9,7 @@ from utils.whatsapp_sender import WhatsappSender
 import shutil
 import tempfile
 from email.mime.application import MIMEApplication
-import telegram
+# import telegram
 import requests  # For fallback method
 import asyncio  # For handling async operations
 
@@ -82,7 +82,7 @@ class NotificationPublisher:
 
     def telegram_push(self, message, image_path=None):
         """
-        Send a message to Telegram channel with improved debugging.
+        Send a message to Telegram channel(s).
         
         Args:
             message (str): Message to send
@@ -92,41 +92,47 @@ class NotificationPublisher:
             tuple: (success, error_message)
         """
         try:
-            # Debug: Print the function inputs
-            print(f"[DEBUG] telegram_push called with message length: {len(message)}")
-            if image_path:
-                print(f"[DEBUG] Image path provided: {image_path} (exists: {os.path.exists(image_path) if image_path else 'N/A'})")
-                
-            telegram_config = self.config_manager.get_telegram_config()
+            # Get configuration
+            config = self.config_manager.get_config()
+            bot_token = config.get("telegram_bot_token")
             
-            if not telegram_config:
-                print("[Telegram] No configuration found")
-                return False, "No Telegram configuration found"
-                
-            # Debug: Print the configuration
-            print(f"[DEBUG] Telegram config: {telegram_config}")
-            
-            # Get the bot token
-            bot_token = telegram_config.get("bot_token")
             if not bot_token:
                 print("[Telegram] No bot token configured")
                 return False, "No bot token configured"
-                
-            # Get the channel IDs
-            channel_ids = telegram_config.get("channel_ids", {})
-            if not channel_ids:
+            
+            # Get channels from both formats (array and legacy single channel)
+            channels = []
+            
+            # Get channels from the array format
+            if "telegram_channels" in config and isinstance(config["telegram_channels"], list):
+                for ch in config["telegram_channels"]:
+                    if isinstance(ch, str):
+                        ch = ch.strip()
+                        if ch:
+                            if not ch.startswith("@") and not ch.lstrip('-').isdigit():
+                                ch = f"@{ch}"
+                            channels.append(ch)
+            
+            # Add the legacy single channel if present and not already in the list
+            legacy_channel = config.get("telegram_chat_id", "").strip()
+            if legacy_channel and legacy_channel not in channels:
+                if not legacy_channel.startswith("@") and not legacy_channel.lstrip('-').isdigit():
+                    legacy_channel = f"@{legacy_channel}"
+                channels.append(legacy_channel)
+            
+            if not channels:
                 print("[Telegram] No channels configured")
                 return False, "No channels configured"
-                
-            print(f"[DEBUG] Found {len(channel_ids)} channel(s) configured: {list(channel_ids.keys())}")
             
-            channels = []
+            print(f"[DEBUG] Sending to {len(channels)} channels: {channels}")
+            
+            successful_channels = []
             errors = []
             
-            # Process all configured channels
-            for channel_name, channel_id in channel_ids.items():
+            # Process all channels
+            for channel in channels:
                 try:
-                    print(f"[Telegram] Sending message to channel: {channel_name} (ID: {channel_id})")
+                    print(f"[Telegram] Sending message to channel: {channel}")
                     
                     # Prepare API URL
                     api_url = f"https://api.telegram.org/bot{bot_token}/"
@@ -138,7 +144,7 @@ class NotificationPublisher:
                             url = api_url + "sendPhoto"
                             files = {'photo': photo}
                             data = {
-                                'chat_id': channel_id,
+                                'chat_id': channel,
                                 'caption': message,
                                 'parse_mode': 'HTML'
                             }
@@ -148,7 +154,7 @@ class NotificationPublisher:
                         # Send just text message
                         url = api_url + "sendMessage"
                         data = {
-                            'chat_id': channel_id,
+                            'chat_id': channel,
                             'text': message,
                             'parse_mode': 'HTML',
                             'disable_web_page_preview': False
@@ -161,30 +167,24 @@ class NotificationPublisher:
                     print(f"[DEBUG] Response content: {response.text[:200]}")
                     
                     if response.status_code == 200:
-                        print(f"[Telegram] Successfully sent message to {channel_name}")
-                        channels.append(channel_name)
+                        print(f"[Telegram] Successfully sent message to {channel}")
+                        successful_channels.append(channel)
                     else:
                         error_message = response.json().get("description", f"Error {response.status_code}")
-                        print(f"[Telegram] Failed to send to {channel_name}: {error_message}")
+                        print(f"[Telegram] Failed to send to {channel}: {error_message}")
                         print(f"[Telegram] Response: {response.text}")
-                        errors.append(f"{channel_name}: {error_message}")
+                        errors.append(f"{channel}: {error_message}")
                         
                 except Exception as e:
-                    print(f"[Telegram] Exception while sending to {channel_name}: {str(e)}")
+                    print(f"[Telegram] Exception while sending to {channel}: {str(e)}")
                     import traceback
                     traceback.print_exc()
-                    errors.append(f"{channel_name}: {str(e)}")
-        
-            if errors:
-                return len(channels) > 0, "; ".join(errors)
-            return True, None
-        
-        except Exception as e:
-            print(f"[Telegram] General error: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False, str(e)
+                    errors.append(f"{channel}: {str(e)}")
 
+        except Exception as errors:
+            return False, str(errors)
+        return True, None
+    
     def test_telegram_config(self, bot_token: str, channel_names: str):
         """Test Telegram configuration with provided credentials"""
         try:
