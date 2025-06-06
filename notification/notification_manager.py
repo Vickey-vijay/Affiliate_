@@ -13,17 +13,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import requests  # For fallback method
 
-# Try to import telegram module, but handle case where it's not installed
-try:
-    import telegram
-    TELEGRAM_MODULE_AVAILABLE = True
-except ImportError:
-    TELEGRAM_MODULE_AVAILABLE = False
-    print("Warning: python-telegram-bot package not installed. Using requests fallback method.")
 
-# Only import asyncio if telegram module is available
-if TELEGRAM_MODULE_AVAILABLE:
-    import asyncio  # For handling async operations
 
 class NotificationManager:
     def __init__(self):
