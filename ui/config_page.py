@@ -169,10 +169,10 @@ class ConfigPage:
             region = st.selectbox("Region", options=["us-east-1"], key="amazon_region", disabled=True)
 
             def savebtn():
-                self.config_manager.update_config("Amazon", "access_key", access_key)
-                self.config_manager.update_config("Amazon", "secret_key", secret_key)
-                self.config_manager.update_config("Amazon", "partner_tag", partner_tag)
-                self.config_manager.update_config("Amazon", "region", region)
+                self.config_manager.update_config("Amazon", "access_key", access_key or "")
+                self.config_manager.update_config("Amazon", "secret_key", secret_key or "")
+                self.config_manager.update_config("Amazon", "partner_tag", partner_tag or "")
+                self.config_manager.update_config("Amazon", "region", region or "")
                 st.success("✅ Amazon API configuration saved successfully!")
 
             if st.button("Save Amazon API Configuration", key="save_amazon_config"):
