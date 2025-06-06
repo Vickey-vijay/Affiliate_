@@ -387,9 +387,10 @@ class AmazonIndiaMonitor:
                 mrp = price * 1.2
                 print(f"[AmazonAPI] ⚠️ CAUTION: Using calculated MRP ({mrp}) as no real MRP available for {asin}")
         
+        # FIXED: Update only current price and MRP, not buy box price
         update_data = {
             "Product_current_price": price,
-            "Product_Buy_box_price": data.get("buy_box_price"),
+            # "Product_Buy_box_price": data.get("buy_box_price"),  # REMOVED THIS LINE
             "Product_image_path": data.get("image_path"),
             "Product_MRP": mrp,
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -414,7 +415,7 @@ class AmazonIndiaMonitor:
         else:
             print(f"{Fore.RED}Response Data: {response}")
         print("\n")
- 
+
 
 
 
