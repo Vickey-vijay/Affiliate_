@@ -23,6 +23,9 @@ class PublishPage:
         # Add a flag to track running jobs
         if "auto_publish_running" not in st.session_state:
             st.session_state.auto_publish_running = False
+        
+        # Initialize the background scheduler for auto-publish
+        self.initialize_auto_publish_scheduler()
  
     def __del__(self):
         """Cleanup resources when page is destroyed"""
@@ -1435,3 +1438,59 @@ class PublishPage:
             print(f"❌ Error in publish_product_with_channels: {str(e)}")
             traceback.print_exc()
             return False, f"Error: {str(e)}"
+    
+    # Add this method to PublishPage class
+    def initialize_auto_publish_scheduler(self):
+        """Set up a background scheduler to check and run the auto-publish job at scheduled times"""
+        import threading
+        import time
+        
+        # Only start if not already running
+        if hasattr(st.session_state, "auto_publish_scheduler_running") and st.session_state.auto_publish_scheduler_running:
+            return
+        
+        st.session_state.auto_publish_scheduler_running = True
+        
+        def scheduler_loop():
+            while st.session_state.auto_publish_scheduler_running:
+                try:
+                    # Check if auto-publish is active
+                    config = self.db.get_auto_publish_config()
+                    if config.get("active", False):
+                        # Get next scheduled run time
+                        next_run_str = config.get("next_run")
+                        if next_run_str:
+                            try:
+                                next_run = datetime.strptime(next_run_str, "%Y-%m-%d %H:%M:%S")
+                                now = datetime.now()
+                                
+                                # If it's time to run (or past time)
+                                if now >= next_run:
+                                    print(f"[Auto-Publish Scheduler] Triggering scheduled job at {now}")
+                                    
+                                    # Run the job with the configured filters and channels
+                                    filters = config.get("filters", {})
+                                    channels = config.get("channels", ["Telegram"])
+                                    
+                                    # Fix buy box prices before running
+                                    self.ensure_valid_buybox_prices()
+                                    
+                                    # Run the job
+                                    self.auto_publish_job(filters, channels)
+                                    
+                                    # The job will update the next_run time in the configuration
+                                    print(f"[Auto-Publish Scheduler] Job completed, next run time updated")
+                            except Exception as e:
+                                print(f"[Auto-Publish Scheduler] Error parsing next run time: {e}")
+            
+                except Exception as e:
+                    print(f"[Auto-Publish Scheduler] Error checking schedule: {e}")
+                
+                # Check every minute
+                time.sleep(60)
+        
+        # Start the scheduler in a background thread
+        scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
+        scheduler_thread.start()
+        st.session_state["auto_publish_scheduler_thread"] = scheduler_thread
+        print("✅ Auto-publish scheduler is running")
